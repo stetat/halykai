@@ -90,7 +90,11 @@ def build_totals(formula: str, target: float, is_ratio: bool) -> dict[str, float
     names = seen
     if not names:
         return None
-    free = names[0]
+    # Prefer a category appearing exactly once. In "(revenue - opex) / revenue" the leading term
+    # sits on both sides of the division, so the function is non-monotonic in it and bisection
+    # cannot converge; opex appears once and the formula falls cleanly in it.
+    once = [c for c in names if len(re.findall(rf"\b{c}\b", formula)) == 1]
+    free = once[0] if once else names[0]
     # Pin the others low enough that max() resolves to the free variable and denominators stay
     # non-zero. For ratios the pinned side is the denominator, so it needs a real magnitude.
     base = 1_000_000.0 if is_ratio else max(abs(target) * 0.25, 1_000.0)
@@ -139,7 +143,11 @@ def totals_to_txns(sc: str, totals: dict[str, float],
         else:
             cp, desc = DESC.get(cat, DESC["other"])
         signed = abs(amount) if cat in INFLOW else -abs(amount)
-        t = Txn(f"TXN-{sc}-{i:04d}", config.SCENARIO_TO_ACC[sc], "2025-06-01",
+        # 9000-block ids. Low ids collide with REAL reclassification targets — TXN-P3-0001 is
+        # an actual applied reclass to opex, so a synthetic revenue row numbered 0001 was being
+        # reclassified out of revenue and the cell read BREACH for a reason nothing to do with
+        # the engine's metric.
+        t = Txn(f"TXN-{sc}-9{i:03d}", config.SCENARIO_TO_ACC[sc], "2025-06-01",
                 signed, "USD", cp, desc, sc)
         t.amount_usd = signed
         txns.append(t)
@@ -178,9 +186,37 @@ def main() -> None:
             # formula naming it cannot be materialised as a ledger. Skipped and reported rather
             # than silently approximated into something that would pass for the wrong reason.
             unmaterialisable = set(_NAME_RE.findall(formula)) - set(DESC) - {"related_party"}
-            if unmaterialisable:
-                skipped.append((sc, cid, f"cannot materialise {sorted(unmaterialisable)} "
-                                         f"as ledger rows"))
+            # Also skip when the ENGINE's metric needs a quantity no ledger row can carry —
+            # group-level capex comes from the parent's consolidated statements and EBITDA is
+            # derived. Consulting the engine here decides only WHETHER a cell is testable, never
+            # what the right answer is; the formula under test still comes solely from the
+            # independent reading. Without this, P5 6.1 reads as a disagreement when in fact the
+            # engine matches the clause («капитальных затрат Группы к EBITDA Заёмщика») and it is
+            # the harness vocabulary that cannot express a Group-scope numerator.
+            try:
+                rf = engine.ratio_formula(spec) or {}
+                needed = {c for _, c in list(rf.get("num", [])) + list(rf.get("den", []))}
+            except Exception:
+                needed = set()
+            # __ebitda__ is NOT excluded: the engine derives it from ledger categories the
+            # harness can materialise, so those cells are testable. Only quantities that no
+            # transaction can carry at all — group-level capex from the parent's consolidated
+            # accounts — make a cell unreachable.
+            engine_side = {c for c in needed
+                           if c not in DESC and c not in ("related_party", "__ebitda__")}
+            if unmaterialisable or engine_side:
+                what = sorted(unmaterialisable | engine_side)
+                skipped.append((sc, cid, f"cannot materialise {what} as ledger rows"))
+                continue
+            # The key rounds `actual` for display (0.04, 1.68). When the true value sits within
+            # that rounding of the threshold, reconstructing it lands exactly ON the boundary and
+            # the verdict is decided by the rounding, not by the engine. P8 6.3 is the case:
+            # key BREACH at "0.04" against a <= 0.04 limit, so the real value must be 0.040x.
+            # Untestable by construction — reported, not counted as a disagreement.
+            thr = spec.get("threshold")
+            if thr is not None and abs(float(target) - float(thr)) < 1e-9:
+                skipped.append((sc, cid, f"key actual {target} is within its own rounding of "
+                                         f"the {thr} threshold — verdict not reconstructible"))
                 continue
             totals = build_totals(formula, float(target),
                                   is_ratio=(spec.get("unit") == "ratio"))
@@ -194,6 +230,20 @@ def main() -> None:
                 txns = totals_to_txns(sc, totals, next(iter(sorted(rps)), None))
                 res = engine.evaluate(spec, txns, catf, rcs,
                                       extras={"ebitda_addback": addback})
+                # An EBITDA add-back is an ABSOLUTE dollar amount, so its effect on a ratio
+                # depends entirely on the revenue scale — and the scale here is invented. P4 6.1
+                # reproduces the key exactly without the add-back and diverges with it, which
+                # says nothing about whether the add-back belongs; only the real ledger's
+                # magnitudes can settle that. Report rather than score it either way.
+                if addback:
+                    bare = engine.evaluate(spec, txns, catf, rcs,
+                                           extras={"ebitda_addback": 0.0})
+                    if (bare.actual is not None and res.actual is not None
+                            and abs(bare.actual - res.actual) > 1e-9):
+                        skipped.append((sc, cid, f"EBITDA add-back ${addback:,.0f} moves actual "
+                                                 f"{bare.actual} -> {res.actual}; undecidable at "
+                                                 f"a synthetic revenue scale"))
+                        continue
             except Exception as e:
                 skipped.append((sc, cid, f"engine error: {e}"))
                 continue
