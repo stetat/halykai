@@ -1,0 +1,215 @@
+"""Stage B compute engine: covenant spec + ledger -> {status, actual, evidence_txn_id}.
+
+Key design points, straight from CASE.ru.md:
+ * The ledger has NO category column. Categories come from (1) auditor reclassifications
+   (highest priority) and (2) a base classifier over counterparty/description.
+ * `actual` is always the POSITIVE magnitude of the metric the covenant bounds.
+ * `evidence_txn_id` is the SINGLE transaction whose reclassification/inclusion/exclusion
+   flips the verdict — found by leave-one-out over the reclassified set, NOT by picking the
+   biggest/last contributor. Ratio & aggregate cells that no single txn decides -> null.
+"""
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Callable
+from .ledger import Txn
+
+# --- categories used by covenant math -------------------------------------------------
+CAPEX = "capex"
+OPEX = "opex"
+LEASE = "lease"
+REVENUE = "revenue"
+RELATED_PARTY = "related_party"
+INSURANCE = "insurance"
+PAYROLL = "payroll"
+OTHER = "other"
+# categories used by the leverage/cover ratio covenants
+FINANCING = "financing"          # поступления по финансированию
+INTEREST = "interest"            # процентные расходы
+TAX = "tax"                      # налоги
+UTILITIES = "utilities"          # коммунальные расходы
+GROUP_CAPEX = "group_capex"      # капитальные затраты Группы (консолидированные)
+UNRESTRICTED_ASSETS = "unrestricted_assets"  # активы, переданные Неограниченным дочерним
+EBITDA = "__ebitda__"            # composite sentinel: sum(REVENUE) - sum(OPEX)
+
+
+@dataclass
+class Reclass:
+    """An auditor reclassification. `applied=False` = considered but rejected (a trap)."""
+    txn_id: str
+    to_category: str
+    from_category: str | None = None
+    applied: bool = True
+
+
+Classifier = Callable[[Txn], str]   # base categoriser over a raw txn
+
+
+class Categorizer:
+    def __init__(self, base: Classifier, reclasses: list[Reclass],
+                 related_parties: set[str] | None = None):
+        self.base = base
+        self.related = {r.lower() for r in (related_parties or set())}
+        self._applied = {r.txn_id: r.to_category for r in reclasses if r.applied}
+
+    def category(self, t: Txn, ignore_reclass: str | None = None) -> str:
+        if t.txn_id in self._applied and t.txn_id != ignore_reclass:
+            return self._applied[t.txn_id]
+        # base classification; related-party membership overrides on the counterparty axis
+        if t.counterparty and t.counterparty.lower() in self.related:
+            return RELATED_PARTY
+        return self.base(t)
+
+
+def _amt(t: Txn) -> float:
+    """USD magnitude of a transaction (expenses stored negative -> abs)."""
+    v = t.amount_usd if t.amount_usd is not None else t.amount
+    return abs(v)
+
+
+def _sum(txns: list[Txn], cat: str, catf: Categorizer, ignore: str | None = None) -> float:
+    return sum(_amt(t) for t in txns if catf.category(t, ignore_reclass=ignore) == cat)
+
+
+def _cat_value(txns, cat, catf, ignore=None) -> float:
+    """Value of a category, expanding the EBITDA composite (Revenue - Opex)."""
+    if cat == EBITDA:
+        return _sum(txns, REVENUE, catf, ignore) - _sum(txns, OPEX, catf, ignore)
+    return _sum(txns, cat, catf, ignore)
+
+
+def _terms_sum(txns, terms, catf, ignore=None) -> float:
+    """Signed sum over [(sign, category), ...] where sign is +1/-1."""
+    return sum(sign * _cat_value(txns, cat, catf, ignore) for sign, cat in terms)
+
+
+# Formula table for the ratio (leverage/cover) covenants, keyed by definition keywords.
+# Each: numerator terms / denominator terms, with an optional springing activation trigger.
+def ratio_formula(spec: dict) -> dict | None:
+    t = f"{spec.get('name','')} {spec.get('metric','')} {spec.get('raw_text','')}".lower()
+    def has(*ks): return all(k in t for k in ks)
+    if has("покрыт", "процент"):
+        return {"id": "interest_cover", "num": [(1, EBITDA)], "den": [(1, INTEREST)]}
+    if has("поступлений по финансировани", "операционных и капитальных"):
+        return {"id": "cover_sources", "num": [(1, REVENUE), (1, FINANCING)],
+                "den": [(1, OPEX), (1, CAPEX)]}
+    if has("поступлений по финансировани", "ebitda"):
+        return {"id": "springing_leverage", "num": [(1, FINANCING)], "den": [(1, EBITDA)],
+                "springing": {"terms": [(1, FINANCING)], "op": ">",
+                              "threshold": spec.get("springing_trigger_usd") or 0.0}}
+    if has("ebitda", "выручк") and ("рентабельн" in t or "margin" in t or "маржа" in t):
+        return {"id": "ebitda_margin", "num": [(1, EBITDA)], "den": [(1, REVENUE)]}
+    if has("затрат группы", "ebitda") or has("группы", "ebitda"):
+        return {"id": "group_capex_ebitda", "num": [(1, GROUP_CAPEX)], "den": [(1, EBITDA)]}
+    if has("налог", "коммунальн", "ebitda"):
+        return {"id": "tax_util_ebitda", "num": [(1, TAX), (1, UTILITIES)], "den": [(1, EBITDA)]}
+    if has("неограниченн", "капитальных затрат"):
+        return {"id": "unrestricted_assets", "num": [(1, UNRESTRICTED_ASSETS)],
+                "den": [(1, CAPEX)]}
+    if has("страховых преми") and ("арендн" in t or "коммунальн" in t):
+        return {"id": "insurance_cover", "num": [(1, INSURANCE)],
+                "den": [(1, LEASE), (1, UTILITIES)]}
+    return None
+
+
+# --- covenant kinds -------------------------------------------------------------------
+def classify_kind(spec: dict) -> str:
+    text = f"{spec.get('name','')} {spec.get('metric','')} {spec.get('raw_text','')}".lower()
+    unit = spec.get("unit")
+    def has(*ks): return any(k in text for k in ks)
+    related = has("связан", "аффилир", "related-party", "related party", "related")
+    if has("капиталоёмк", "capital intensity"):
+        return "CAPEX_INTENSITY"
+    # The threshold UNIT decides absolute-aggregate vs ratio covenants.
+    if unit == "ratio":
+        if related:
+            return "RELATED_PARTY_RATIO"
+        # a leverage/cover ratio we can express as a signed-category formula
+        if ratio_formula(spec):
+            return "RATIO"
+        return "RATIO_OTHER"         # unknown ratio -> not computable from ledger
+    # absolute ($) aggregates
+    if related:
+        return "RELATED_PARTY_ABS"
+    if has("выручк", "revenue") and spec.get("operator") in (">=", ">"):
+        return "MIN_REVENUE"
+    return "GENERIC"
+
+
+def compute_actual(kind: str, txns: list[Txn], catf: Categorizer,
+                   extras: dict | None = None, ignore: str | None = None) -> float | None:
+    extras = extras or {}
+    if kind == "CAPEX_INTENSITY":
+        num = _sum(txns, CAPEX, catf, ignore)
+        den = _sum(txns, OPEX, catf, ignore) + _sum(txns, LEASE, catf, ignore)
+        return num / den if den else None
+    if kind == "RATIO":
+        f = extras.get("formula")
+        if not f:
+            return None
+        den = _terms_sum(txns, f["den"], catf, ignore)
+        return _terms_sum(txns, f["num"], catf, ignore) / den if den else None
+    if kind == "MIN_REVENUE":
+        return _sum(txns, REVENUE, catf, ignore)
+    if kind == "RELATED_PARTY_ABS":
+        return _sum(txns, RELATED_PARTY, catf, ignore)
+    if kind == "RELATED_PARTY_RATIO":
+        rev = _sum(txns, REVENUE, catf, ignore) or extras.get("revenue")
+        rp = _sum(txns, RELATED_PARTY, catf, ignore)
+        return rp / rev if rev else None
+    if kind == "LEVERAGE":
+        ebitda = extras.get("ebitda")
+        debt = extras.get("total_debt")
+        return (debt / ebitda) if (ebitda and debt is not None) else None
+    if kind == "GENERIC":
+        cat = (extras.get("category") or OTHER)
+        return _sum(txns, cat, catf, ignore)
+    return None
+
+
+def _status(op: str, actual: float, thr: float) -> str:
+    if op in ("<=", "<"):
+        return "COMPLIANT" if (actual <= thr if op == "<=" else actual < thr) else "BREACH"
+    return "COMPLIANT" if (actual >= thr if op == ">=" else actual > thr) else "BREACH"
+
+
+@dataclass
+class Result:
+    status: str
+    actual: float | None
+    evidence_txn_id: str | None
+    kind: str = ""
+    detail: dict = field(default_factory=dict)
+
+
+def evaluate(spec: dict, txns: list[Txn], catf: Categorizer,
+             reclasses: list[Reclass], extras: dict | None = None) -> Result:
+    kind = classify_kind(spec)
+    op = spec.get("operator", "<=")
+    thr = spec.get("threshold")
+    extras = dict(extras or {})
+    formula = ratio_formula(spec) if kind == "RATIO" else None
+    if formula:
+        extras.setdefault("formula", formula)
+    actual = compute_actual(kind, txns, catf, extras)
+    if actual is None or thr is None:
+        return Result("UNKNOWN", None, None, kind, {"reason": "insufficient data"})
+
+    # Springing covenants only bind when their activation trigger is met; otherwise the
+    # covenant is COMPLIANT by non-application (but `actual` is still the reported ratio).
+    active = True
+    if formula and formula.get("springing"):
+        s = formula["springing"]
+        trig = _terms_sum(txns, s["terms"], catf)
+        active = trig > s["threshold"] if s["op"] == ">" else trig >= s["threshold"]
+    status = _status(op, actual, thr) if active else "COMPLIANT"
+
+    # Evidence = the single APPLIED reclassification whose removal flips the verdict.
+    evidence = None
+    if status == "BREACH":
+        for r in (x for x in reclasses if x.applied):
+            alt = compute_actual(kind, txns, catf, extras, ignore=r.txn_id)
+            if alt is not None and _status(op, alt, thr) == "COMPLIANT":
+                evidence = r.txn_id
+                break
+    return Result(status, round(abs(actual), 2), evidence, kind,
+                  {"threshold": thr, "operator": op, "active": active})
