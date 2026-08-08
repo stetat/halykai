@@ -111,6 +111,11 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
             spec = covs.get(cid)
             if not spec:
                 continue
+            # A related-party covenant with an empty KYC list computes 0 and reports a
+            # confident COMPLIANT — the most dangerous kind of wrong answer here.
+            if not rps and "RELATED" in engine.classify_kind(spec):
+                print(f"!! {sc} {cid} is a related-party covenant but no related parties "
+                      f"were resolved for {acc}; it will compute 0. Check the KYC dossier.")
             # One bad cell must never cost us the other 35.
             try:
                 res = engine.evaluate(spec, txns, catf, rcs)

@@ -24,12 +24,17 @@ _CAT_MAP = [
 ]
 REJECT_RE = re.compile(r"не\s+производил|сохран\w+|без\s+корректир|не\s+переклассифиц", re.I)
 INTERIM_RE = re.compile(r"промежуточн|предварительн|черновик|interim|preliminary", re.I)
-# TXN, original category, amount, [new category]
-RECLASS_RE = re.compile(
-    r"(TXN-[A-Za-z0-9-]+)[^.]*?первоначально[^.]*?как\s+([^.,($]+?)\s*"
-    r"(?:\(\s*\$?([0-9][0-9\s.,]*[0-9])\s*\))?[^.]*?"
-    r"(?:переклассифиц\w+[^.]*?как\s+([^.,\n]+))?\.",
-    re.S | re.I)
+
+# One reclassification = one sentence beginning at a TXN id. The sentence terminator is
+# a period NOT followed by a digit: amounts like "($418,204.37)" contain periods, and
+# treating those as sentence ends truncated the clause before "переклассифицирована",
+# so every reclassification carrying a dollar amount parsed as {from:'К', to:None} and
+# silently became "not applied" -> no evidence anywhere.
+RECLASS_RE = re.compile(r"(TXN-[A-Za-z0-9-]+)((?:[^.]|\.(?=\d))*)\.(?!\d)", re.S)
+_FROM_RE = re.compile(r"первоначальн\w*\s+(?:учтённ\w+|учтен\w+|отражённ\w+|отражен\w+|"
+                      r"классифицирован\w*)?\s*как\s+([^,(]+)", re.I)
+_TO_RE = re.compile(r"(?:пере|ре)классифицирован\w*.*?\bкак\s+([^,(]+)", re.I | re.S)
+_AMT_RE = re.compile(r"\$\s*([0-9][0-9\s.,]*)")
 
 
 def _to_cat(text: str | None) -> str:
@@ -58,31 +63,93 @@ def for_account(acc: str, dm: dict | None = None) -> list[Reclass]:
     # prefer the final audit report over interim worksheets
     audit_docs = groups.get("audits", []) + groups.get("other", [])
     out: dict[str, Reclass] = {}
+    seen_final: set[str] = set()
+    # A reclassification only counts for THIS borrower. Documents quote the spec's example
+    # scenario ("TXN-T1-0020") and occasionally other borrowers; both must be ignored.
+    want = config.ACC_TO_SCENARIO.get(acc, "").upper()
     for name in audit_docs:
         text = pdftext.extract_text(config.DATASET / name)
         interim = bool(INTERIM_RE.search(text))
         for m in RECLASS_RE.finditer(text):
-            txn, from_txt, amt_txt, to_txt = m.groups()
-            applied = bool(to_txt) and not REJECT_RE.search(m.group(0))
-            rc = Reclass(txn_id=txn, to_category=_to_cat(to_txt),
-                         from_category=_to_cat(from_txt), applied=applied)
-            # final report wins over interim; applied wins over a prior rejected read
-            prev = out.get(txn)
-            if prev is None or (not interim) or (rc.applied and not prev.applied):
-                out[txn] = rc
+            txn, body = m.group(1), m.group(2)
+            parts = txn.split("-")
+            if want and len(parts) > 1 and parts[1].upper() != want:
+                continue
+            frm = _FROM_RE.search(body)
+            to = _TO_RE.search(body)
+            # A reclassification is APPLIED when the clause states a new category and does
+            # not walk it back ("первоначальная классификация сохраняется", "корректировка
+            # не производилась"). Interim worksheets still carry real reclassifications —
+            # they are only outranked when a FINAL report speaks about the same txn.
+            applied = bool(to) and not REJECT_RE.search(body)
+            rc = Reclass(txn_id=txn,
+                         to_category=_to_cat(to.group(1) if to else None),
+                         from_category=_to_cat(frm.group(1) if frm else None),
+                         applied=applied)
+            if txn in seen_final and interim:
+                continue                       # a final report already settled this txn
+            out[txn] = rc
+            if not interim:
+                seen_final.add(txn)
     return list(out.values())
 
 
+# The KYC dossier decides related-party status by an OWNERSHIP THRESHOLD that differs per
+# borrower (seen: 20%–38%): "Организации, в которых Группа владеет 36.0% и более голосующих
+# прав, признаются связанными сторонами для целей Договора." Entities listed below that
+# threshold are decoys — e.g. Saryarka Terminal Properties LLP at 33.5% against a 36.0% bar.
+_OWN_ROW_RE = re.compile(r'^[ \t]*("?[A-Za-zА-Яа-я][^\n%]{2,70}?)[ \t]+(\d{1,3}[.,]\d+)[ \t]*%[ \t]*$',
+                         re.M)
+_THRESHOLD_RE = re.compile(r"владе\w*\s+(\d{1,3}[.,]\d+)\s*%\s*и\s+более", re.I)
+# A holding can be disclaimed in a footnote: the table shows the gross stake, but the
+# Group's actual voting rights are lower ("удерживается косвенно ... Группе принадлежит X%").
+_INDIRECT_RE = re.compile(
+    r"Дол\w+\s+в\s+(.+?)\s+удерживается[^;.]*[;.]\s*Групп\w+\s+принадлежит\s+"
+    r"(\d{1,3}[.,]\d+)\s*%", re.I | re.S)
+
+
+def _pct(s: str) -> float:
+    return float(s.replace(",", "."))
+
+
+def _clean_name(s: str) -> str:
+    # quotes sit INSIDE the name too ('"Saryarka Capital Partners" LLP'), so strip them all
+    s = re.sub(r'["«»„“”]', " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"^(?:Организация|Доля голосующих прав)\s+", "", s, flags=re.I)
+    return s.strip(" .,")
+
+
 def related_parties(acc: str, dm: dict | None = None) -> set[str]:
-    """Related-party counterparties named in the KYC dossier (IAS 24 disclosures)."""
+    """Counterparties that qualify as related parties for this borrower.
+
+    Membership is an ownership test in the KYC dossier, NOT a payment description — the
+    contracts say so explicitly ("Отнесение контрагента к аффилированным лицам определяется
+    ... а не назначением платежа"). Returning every company name in the file (the previous
+    behaviour) inflates every related-party covenant; 12 of the 36 cells depend on this."""
     dm = dm or docmap.build(save=False)
     groups = dm["by_acc"].get(acc, {})
+    # The dossier is not always filed under "kyc" — for ACC-7809 it lands in "audits".
+    docs = groups.get("kyc", []) + groups.get("audits", []) + groups.get("other", [])
     parties: set[str] = set()
-    for name in groups.get("kyc", []) + groups.get("other", []):
+    for name in docs:
         text = pdftext.extract_text(config.DATASET / name)
-        # company-like names (…LLP / …JSC / …LLC / ТОО / АО)
-        for m in re.finditer(r"([A-ZА-Я][\w&.\- ]{3,60}?(?:LLP|JSC|LLC|ТОО|АО|Ltd))", text):
-            parties.add(m.group(1).strip())
+        thr = _THRESHOLD_RE.search(text)
+        if not thr:
+            continue
+        threshold = _pct(thr.group(1))
+        holdings: dict[str, float] = {}
+        for m in _OWN_ROW_RE.finditer(text[:thr.start()]):
+            nm = _clean_name(m.group(1))
+            if nm and not nm.lower().startswith(("организац", "групп")):
+                holdings[nm] = _pct(m.group(2))
+        # footnotes override the table (indirect holdings count at the lower real stake)
+        for m in _INDIRECT_RE.finditer(text):
+            nm = _clean_name(m.group(1))
+            for k in list(holdings):
+                if k.lower() == nm.lower() or nm.lower() in k.lower():
+                    holdings[k] = _pct(m.group(2))
+        parties |= {n for n, p in holdings.items() if p >= threshold}
     return parties
 
 

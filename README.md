@@ -41,8 +41,25 @@ pipeline/
   test_engine.py  synthetic-ledger correctness tests for the engine
   test_ledger.py  dialect torture-test: the same ledger in 8 plausible formats
   test_roundtrip.py  the 36/36 forced through a hostile file (cp1251/';'/Cyrillic/KZT+FX)
+  test_docs.py    document reading vs REAL ground truth (evidence ids, KYC thresholds)
   cli.py          entry point
 ```
+
+## Related parties are an ownership test, not a name match
+The contracts are explicit: *"Отнесение контрагента к аффилированным лицам определяется …
+**а не назначением платежа**"*. Each KYC dossier carries an ownership table and a threshold
+that **differs per borrower** (seen: 20%–38%):
+
+> Организации, в которых Группа владеет **36.0% и более** голосующих прав, признаются
+> связанными сторонами для целей Договора.
+
+Only holders at or above that bar qualify. The dossiers are seeded with near-miss decoys
+(`Saryarka Terminal Properties LLP` at 33.5% against a 36.0% bar) and one **footnote trap**:
+a stake shown as 48.0% in the table is held indirectly, with the Group's real voting rights
+disclosed further down as 27.3% — below that dossier's 30.0% bar, so it does **not** qualify.
+Previously `related_parties()` returned every company name in the file, which inflates all
+12 related-party cells. 10/12 borrowers resolve; **P2 and P6 ship no ownership dossier** in
+this release, so `solve` warns rather than silently reporting a confident COMPLIANT on 0.
 
 ## Event-day ingestion hardening
 The case states the ledger is **one file for all borrowers, multi-currency, expenses
@@ -114,6 +131,12 @@ keywords don't cover, so recalibrate both against the actual ledger on event day
   counterparty names — rather than invented by us; the other 22 are hand-written, so treat
   this as a calibration signal, not a guarantee.
 - Engine metric-definition tests: **9/9**, each written against real mined clause wording.
+- Document ground-truth tests (`python -m pipeline.test_docs`): **all pass**. Evidence
+  transactions the documents actually name are recovered **2/2** as applied
+  reclassifications (was 0/2 — the parser's sentence terminator broke on the `.` inside
+  `($418,204.37)`, so every reclassification carrying an amount silently became
+  "not applied" and no cell could ever produce evidence). The remaining **7/9 evidence ids
+  appear in no document** and are only derivable once the ledger ships.
 - Ledger dialect torture-test (`python -m pipeline.test_ledger`): **all pass** — 8 formats
   parse identically, plus FX and number-parsing edge cases.
 - Hostile-dialect round trip (`python -m pipeline.test_roundtrip`): the same 36 cells pushed

@@ -45,18 +45,33 @@ class Reclass:
 Classifier = Callable[[Txn], str]   # base categoriser over a raw txn
 
 
+def _norm_party(s: str) -> str:
+    """Punctuation-insensitive party name: the KYC table and the ledger will not agree on
+    commas, quotes or dots ('"Aral Capital Partners", LLP' vs 'Aral Capital Partners LLP')."""
+    return re.sub(r"[^0-9a-zа-яё]+", " ", (s or "").lower()).strip()
+
+
 class Categorizer:
     def __init__(self, base: Classifier, reclasses: list[Reclass],
                  related_parties: set[str] | None = None):
         self.base = base
-        self.related = {r.lower() for r in (related_parties or set())}
+        self.related = {p for p in (_norm_party(r) for r in (related_parties or set())) if p}
         self._applied = {r.txn_id: r.to_category for r in reclasses if r.applied}
+
+    def _is_related(self, counterparty: str) -> bool:
+        cp = _norm_party(counterparty)
+        if not cp:
+            return False
+        # exact, else containment either way (guarded by length so short tokens can't match)
+        return any(cp == r or (len(r) >= 6 and r in cp) or (len(cp) >= 6 and cp in r)
+                   for r in self.related)
 
     def category(self, t: Txn, ignore_reclass: str | None = None) -> str:
         if t.txn_id in self._applied and t.txn_id != ignore_reclass:
             return self._applied[t.txn_id]
-        # base classification; related-party membership overrides on the counterparty axis
-        if t.counterparty and t.counterparty.lower() in self.related:
+        # base classification; related-party membership overrides on the counterparty axis.
+        # The contracts are explicit that this is an identity test, not a description test.
+        if self._is_related(t.counterparty):
             return RELATED_PARTY
         return self.base(t)
 
