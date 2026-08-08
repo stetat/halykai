@@ -58,6 +58,34 @@ def _report_ledger(txns, txns_by_sc, rates, missing) -> None:
               f"they are being counted 1:1 and every affected `actual` will be wrong.")
     elif missing:
         print(f"!! no FX rate for {missing} — counted 1:1.")
+    _report_classifier_coverage(txns)
+
+
+def _report_classifier_coverage(txns) -> None:
+    """What share of the ledger the vocabulary actually recognised.
+
+    Whatever matches no keyword falls through to the sign of the amount: every unmatched
+    credit becomes revenue and every unmatched DEBIT becomes opex. The fallback cannot emit
+    capex, lease, utilities, tax, interest or insurance at all, so a real capex or tax payment
+    with unfamiliar wording is silently booked as opex — and opex is a denominator in
+    CAPEX_INTENSITY and in P6 6.1, where inflating it understates the ratio and can turn a
+    BREACH into a COMPLIANT. Held-out sets put this at ~28% of rows, so it is shouted about.
+    Anything here is a list of rows to eyeball before trusting the affected cells."""
+    if not txns:
+        return
+    fallback = [t for t in txns
+                if classifier.categorize_verbose(t)[1] == classifier.SIGN_FALLBACK]
+    if not fallback:
+        return
+    pct = len(fallback) / len(txns)
+    mark = "!!" if pct >= 0.15 else "  "
+    print(f"{mark} {len(fallback)}/{len(txns)} rows ({pct:.0%}) matched NO category keyword "
+          f"and were classified by the sign of the amount alone.")
+    if pct >= 0.15:
+        print("     Those can only come out as revenue/opex; a capex or tax row among them is "
+              "now opex.")
+        for t in fallback[:5]:
+            print(f"     sample: {t.counterparty} | {t.description[:58]}")
 
 
 def solve(ledger_path: str | None = None, fx_path: str | None = None,
@@ -98,11 +126,20 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
         # Identity/adjustment facts that live only inside embedded images (image_facts.json)
         unrestricted = reclass.unrestricted_subsidiaries(acc)
         addback = reclass.ebitda_addback(acc)
-        if classifier_mode == "gemini":
+        if classifier_mode in ("gemini", "hybrid"):
             # one Gemini call for this borrower; LLM handles related-party via the KYC list,
-            # so we don't also apply the noisy counterparty override here.
+            # so we don't also apply the noisy counterparty override here. "hybrid" asks only
+            # about rows the keyword table could not decide — same answer where it was already
+            # confident, far less quota, and a 429 degrades to the deterministic result.
+            fn = (classifier.classify_hybrid if classifier_mode == "hybrid"
+                  else classifier.classify_batch)
             try:
-                cat_map = classifier.classify_batch(txns, related_parties=rps)
+                cat_map = fn(txns, related_parties=rps)
+                st = fn.last_stats
+                if classifier_mode == "hybrid":
+                    print(f"   {sc}: asked Gemini about {st['asked']}/{len(txns)} rows, "
+                          f"{st['llm_used']} answers used"
+                          + (f" ({len(st['errors'])} call(s) failed)" if st["errors"] else ""))
                 base = classifier.make_base_classifier(cat_map)
                 catf = Categorizer(base, rcs, related_parties=set(),
                                    unrestricted_parties=unrestricted)

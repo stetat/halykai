@@ -6,6 +6,9 @@
   python -m pipeline.cli specs --no-llm   # regex-only, no API calls
   python -m pipeline.cli validate   # bracket-check extraction vs answer key (no API)
   python -m pipeline.cli solve [--ledger master_ledger_2025.csv]  # -> submission.json
+      --classifier keyword   deterministic only (default; free, no quota)
+      --classifier hybrid    keyword + ask Gemini ONLY about rows no rule decided (~28%)
+      --classifier gemini    ask Gemini about every row (most quota, 429s soonest)
   python -m pipeline.cli score [submission.json]   # score vs answer key
 """
 from __future__ import annotations

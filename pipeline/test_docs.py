@@ -75,6 +75,31 @@ check("TXN-P9-0025 parsed past the $ amount into from/to categories",
       bool(p9) and p9[0].from_category == "capex" and p9[0].to_category == "payroll",
       f"got {[(r.from_category, r.to_category) for r in p9]}")
 
+# A FINAL audit report supersedes the interim worksheets wholesale — both documents say so
+# outright. B1's draft moves TXN-B1-0023 ($6,166,592.66) from opex to utilities, and B1 6.2 is
+# max(payroll, utilities), so honouring the draft turns a COMPLIANT cell into a BREACH. The
+# answer key's $1,284,663.42 is consistent only with the draft being ignored.
+_b1 = reclass.for_account("ACC-7201", _DM)
+check("B1: the superseded draft's TXN-B1-0023 reclassification is not applied",
+      not any(r.txn_id == "TXN-B1-0023" and r.applied for r in _b1),
+      f"got {[(r.txn_id, r.to_category, r.applied) for r in _b1]}")
+
+# The trap underneath that one: the final report is recognised BY the sentence "Настоящий отчёт
+# заменяет любые промежуточные ведомости", which contains "промежуточн" — so a bare interim
+# keyword search reads the superseding document as the superseded one.
+_final = pdftext.extract_text(config.DATASET / "46587c5f8e49.pdf")
+check("the final report is not misread as an interim worksheet",
+      not ((not reclass._SUPERSEDES_RE.search(_final))
+           and reclass.INTERIM_RE.search(_final)))
+check("the interim worksheet is still recognised as interim",
+      bool(reclass.INTERIM_RE.search(
+          pdftext.extract_text(config.DATASET / "2d42722d9dec.pdf"))))
+
+# Borrowers whose reclassifications come from a final report must be untouched by the rule.
+check("P9's final-report reclassification survives the interim/final split",
+      any(r.txn_id == "TXN-P9-0025" and r.applied
+          for r in reclass.for_account("ACC-7809", _DM)))
+
 # --- related parties --------------------------------------------------------------------
 # Membership is an ownership threshold in the KYC dossier, and the thresholds differ per
 # borrower. Entities listed BELOW the bar are decoys and must be excluded.

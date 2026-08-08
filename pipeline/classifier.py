@@ -52,11 +52,147 @@ _CAPEX_STRONG = ("капитальн", "capex", "строитель", "реко�
 # ("комиссионное вознаграждение агента") or remuneration ("вознаграждение членам совета
 # директоров"). Mapping it unconditionally cost as many cells as it fixed, and mis-routed
 # money into INTEREST — a denominator in nine RATIO covenants.
-_DEBT_CTX = ("займ", "кредит", "облигац", "овердрафт", "транш", "ссуд", "loan", "facility")
-_BUY = ("приобрет", "покупк", "закуп", "поставк", "монтаж")
+_DEBT_CTX = ("займ", "кредит", "облигац", "овердрафт", "транш", "ссуд", "loan", "facility",
+             "қарыз", "несие", "банктік")
+# A prepayment or advance is a buy verb only in company of an asset noun (below), so the
+# common "авансовый платёж за <услуги>" stays opex. English forms matter: the ledger carries
+# supplier narrations from Turkish, Chinese and German vendors.
+_BUY = ("приобрет", "покупк", "закуп", "поставк", "монтаж", "аванс",
+        "prepayment", "purchase", "acquisition", "advance payment", "supply of")
 _ASSET = ("оборудован", "техник", "кран", "тягач", "грузов", "погрузчик", "машин",
           "автопарк", "транспортн", "корпус", "здани", "склад", "экскаватор",
-          "станок", "установк", "сооружен", "лини сортировк", "линии сортировк")
+          "станок", "установк", "сооружен", "лини", "ктп", "подстанц", "жабдық",
+          "excavator", "equipment", "crane", "machinery", "vehicle", "truck", "loader")
+
+
+# Kazakh is an official language and the banks emit it, but this table was Russian-only, so
+# "Жалақы төлеу" (wages), "жалдау ақысы" (rent) and "Электр энергиясы" all fell through to the
+# sign guess and became opex. Kazakh is agglutinative — match the stem and let suffixes run.
+_RULES = [("аренд", LEASE), ("лизинг", LEASE), ("lease", LEASE),
+          ("жалдау", LEASE), ("жалға", LEASE), ("жалдам", LEASE),
+          # "вознаграждение" is the standard KZ banking word for INTEREST, but
+          # "управленческое вознаграждение" is a management fee — excluded below.
+          ("процент", INTEREST), ("interest", INTEREST), ("вознагражден", INTEREST),
+          ("сыйақы", INTEREST), ("пайыз", INTEREST),
+          ("налог", TAX), ("tax", TAX), ("ндс", TAX), ("vat", TAX), ("кпн", TAX),
+          ("пошлин", TAX), ("госдоход", TAX), ("салық", TAX),
+          ("окружающ", TAX), ("эмисси в окруж", TAX),
+          ("водоснаб", UTILITIES), ("водоотвед", UTILITIES), ("коммунал", UTILITIES),
+          ("электр", UTILITIES), ("тепло", UTILITIES), ("газоснаб", UTILITIES),
+          ("газ", UTILITIES), ("utility", UTILITIES), ("жарық", UTILITIES),
+          ("жылу", UTILITIES), ("сумен жабд", UTILITIES),
+          ("страхов", INSURANCE), ("insurance", INSURANCE), ("полис", INSURANCE),
+          ("огпо", INSURANCE), ("каско", INSURANCE), ("policy", INSURANCE),
+          ("premium", INSURANCE), ("сақтандыр", INSURANCE),
+          # "труда" (not "оплат труда") so the contracts' canonical label
+          # "Расходы на оплатУ труда" matches — the inflected form broke the substring.
+          ("труда", PAYROLL), ("персонал", PAYROLL), ("зарплат", PAYROLL),
+          ("заработн", PAYROLL), ("payroll", PAYROLL), ("фот", PAYROLL),
+          ("пенсионн", PAYROLL), ("сотрудник", PAYROLL), ("трудов", PAYROLL),
+          ("работник", PAYROLL), ("отпускн", PAYROLL), ("отпуск", PAYROLL),
+          ("материальной помощи", PAYROLL), ("больничн", PAYROLL),
+          ("совета директоров", PAYROLL), ("преми", PAYROLL),
+          ("жалақы", PAYROLL), ("еңбекақы", PAYROLL), ("зейнетақы", PAYROLL),
+          ("финансирован", FINANCING), ("займ", FINANCING), ("кредитн", FINANCING),
+          ("транш", FINANCING), ("drawdown", FINANCING), ("credit facility", FINANCING),
+          ("loan", FINANCING), ("borrowing", FINANCING), ("tranche", FINANCING),
+          ("қарыз", FINANCING), ("несие", FINANCING),
+          ("выручк", REVENUE), ("продаж", REVENUE), ("реализац", REVENUE), ("revenue", REVENUE),
+          ("операционн", OPEX), ("opex", OPEX)]
+
+SIGN_FALLBACK = "sign-fallback"
+
+# A bare `in` test matches across word boundaries, which is not a nuance — it is wrong twice
+# over. "PREPAYMENT FOR EXCAVATOR" was booked as tax because "exca-VAT-or" contains "vat", and
+# "договор БЕСПРОЦЕНТНОГО займа" — an interest-FREE loan — was booked as interest because
+# "бес-ПРОЦЕНТ-ного" contains "процент". Both are inverted answers, not near misses.
+#
+# So every token must start at a word boundary. Russian tokens are STEMS and still match any
+# suffix ("электр" -> "электрическую", "электроэнергия", "электр энергиясы"). Latin and very
+# short tokens are anchored at both ends, since those are the ones that hide inside longer
+# words. Tokens containing a space are matched as a phrase from a word boundary.
+_TOKEN_RE: dict[str, re.Pattern] = {}
+
+
+# Cyrillic tokens are STEMS and must stay open-ended, or "займ" stops matching "займа" and
+# every loan in the ledger becomes opex. Only ASCII tokens get a closing boundary — they are
+# the ones that hide inside longer words ("vat" in "excavator") — plus the handful of Cyrillic
+# abbreviations that are whole words in their own right.
+_CLOSED = {"фот", "опв", "осмс", "ктп", "огпо"}
+
+
+def _tok(kw: str) -> re.Pattern:
+    rx = _TOKEN_RE.get(kw)
+    if rx is None:
+        both = kw.isascii() or kw in _CLOSED
+        rx = _TOKEN_RE[kw] = re.compile(
+            r"\b" + re.escape(kw) + (r"\b" if both else ""), re.UNICODE)
+    return rx
+
+
+# "НДС"/"VAT" name the tax only when the payment IS the tax. On a Kazakh invoice narration the
+# far commoner uses are "в т.ч. НДС 12%" and "БЕЗ НДС", which mark a customer receipt — the
+# opposite category. Any of these nearby means the token is describing the invoice, not the
+# payment's purpose.
+_VAT_MENTION = ("в т.ч", "в том числе", "вкл. ндс", "включая ндс", "без ндс", "не облагается",
+                "incl", "including", "excl", "w/o vat", "without vat")
+
+
+def _rule_applies(kw: str, blob: str) -> bool:
+    """Whether a rule token fires, including its exceptions."""
+    if not _tok(kw).search(blob):
+        return False
+    if kw in ("вознагражден", "сыйақы"):
+        # a management fee or a plain fee is not interest — see _DEBT_CTX above
+        return "управленческ" not in blob and any(_tok(d).search(blob) for d in _DEBT_CTX)
+    if kw in ("ндс", "vat"):
+        return not any(m in blob for m in _VAT_MENTION)
+    if kw == "персонал":
+        # "услуги по подбору персонала" is a recruitment agency's fee — opex, not payroll
+        return "подбор" not in blob
+    return True
+
+
+def categorize_verbose(t) -> tuple[str, str, bool]:
+    """Return (category, deciding_rule, contested).
+
+    `deciding_rule` is the token that settled it, or SIGN_FALLBACK when NOTHING in the
+    vocabulary matched and the answer came from the sign of the amount alone. A sign-fallback
+    answer is a coin-flip dressed as a classification: it says "positive so probably revenue",
+    which is right often enough to flatter an accuracy score while carrying no evidence. Runs
+    with many of them should be treated as unclassified, not as classified-correctly.
+
+    `contested` means vocabulary from more than one category appeared, so the answer depended
+    on _RULES ordering rather than on an unambiguous signal. Adding a token to this table can
+    silently steal transactions from another category — that is exactly how "вознаграждение"
+    moved money into INTEREST, a denominator in nine RATIO covenants."""
+    blob = f"{t.counterparty} {t.description}".lower()
+
+    if any(w in blob for w in _CONSUMABLE):
+        return OPEX, "consumable", False
+    # "основных/основного средства" — match the stem pair, never a fixed inflection
+    fixed_assets = "основн" in blob and "средств" in blob
+    if (any(w in blob for w in _BUY) and any(w in blob for w in _ASSET)) \
+            or any(w in blob for w in _CAPEX_STRONG) or fixed_assets:
+        return CAPEX, "capex-asset", False
+
+    # Statutory payroll deductions appear as bare abbreviations, which need word boundaries —
+    # as substrings they would fire inside unrelated words. ("СО" for социальные отчисления is
+    # deliberately absent: "со" is a Russian preposition.) Tax words still take precedence.
+    if re.search(r"\b(опв|осмс|впосмс)\b", blob) and not any(
+            w in blob for w in ("налог", "ндс", "кпн")):
+        return PAYROLL, "opv-abbrev", False
+
+    # "Оплата % по договору займа" — the percent SIGN carries the meaning and no word matches,
+    # so "займ" would otherwise book an interest payment as a financing drawdown.
+    if "%" in blob and any(_tok(d).search(blob) for d in _DEBT_CTX):
+        return INTEREST, "percent-sign", False
+
+    hits = [(kw, cat) for kw, cat in _RULES if _rule_applies(kw, blob)]
+    if hits:
+        kw, cat = hits[0]
+        return cat, kw, len({c for _, c in hits}) > 1
+    return (REVENUE if (t.amount_usd or t.amount) > 0 else OPEX), SIGN_FALLBACK, False
 
 
 def keyword_category(t) -> str:
@@ -65,56 +201,11 @@ def keyword_category(t) -> str:
     `solve.base_classifier` is this function. Keep the two paths identical; they silently
     diverged once (a stale copy in solve.py scored 23% against this one's 100%).
 
-    Vocabulary is deliberately over-inclusive on RU inflection: substring rules must match
-    the case-inflected form that actually appears ("основныХ средств", not "основны средств"),
-    a class of bug this table has shipped twice."""
-    blob = f"{t.counterparty} {t.description}".lower()
-
-    if any(w in blob for w in _CONSUMABLE):
-        return OPEX
-    # "основных/основного средства" — match the stem pair, never a fixed inflection
-    fixed_assets = "основн" in blob and "средств" in blob
-    if (any(w in blob for w in _BUY) and any(w in blob for w in _ASSET)) \
-            or any(w in blob for w in _CAPEX_STRONG) or fixed_assets:
-        return CAPEX
-
-    # Statutory payroll deductions appear as bare abbreviations, which need word boundaries —
-    # as substrings they would fire inside unrelated words. ("СО" for социальные отчисления is
-    # deliberately absent: "со" is a Russian preposition.) Tax words still take precedence.
-    if re.search(r"\b(опв|осмс|впосмс)\b", blob) and not any(
-            w in blob for w in ("налог", "ндс", "кпн")):
-        return PAYROLL
-
-    rules = [("аренд", LEASE), ("лизинг", LEASE), ("lease", LEASE),
-             # "вознаграждение" is the standard KZ banking word for INTEREST, but
-             # "управленческое вознаграждение" is a management fee — excluded below.
-             ("процент", INTEREST), ("interest", INTEREST), ("вознагражден", INTEREST),
-             ("налог", TAX), ("tax", TAX), ("ндс", TAX), ("vat", TAX), ("кпн", TAX),
-             ("пошлин", TAX), ("госдоход", TAX),
-             ("водоснаб", UTILITIES), ("водоотвед", UTILITIES), ("коммунал", UTILITIES),
-             ("электро", UTILITIES), ("тепло", UTILITIES), ("газоснаб", UTILITIES), ("utility", UTILITIES),
-             ("страхов", INSURANCE), ("insurance", INSURANCE),
-             # "труда" (not "оплат труда") so the contracts' canonical label
-             # "Расходы на оплатУ труда" matches — the inflected form broke the substring.
-             ("труда", PAYROLL), ("персонал", PAYROLL), ("зарплат", PAYROLL),
-             ("заработн", PAYROLL), ("payroll", PAYROLL), ("фот", PAYROLL),
-             ("пенсионн", PAYROLL), ("сотрудник", PAYROLL), ("трудов", PAYROLL),
-             ("работник", PAYROLL), ("отпускн", PAYROLL), ("отпуск", PAYROLL),
-             ("материальной помощи", PAYROLL), ("больничн", PAYROLL),
-             ("совета директоров", PAYROLL),
-             ("финансирован", FINANCING), ("займ", FINANCING), ("кредитн", FINANCING),
-             ("транш", FINANCING), ("drawdown", FINANCING), ("credit facility", FINANCING),
-             ("loan", FINANCING), ("borrowing", FINANCING), ("tranche", FINANCING),
-             ("выручк", REVENUE), ("продаж", REVENUE), ("реализац", REVENUE), ("revenue", REVENUE),
-             ("операционн", OPEX), ("opex", OPEX)]
-    for kw, cat in rules:
-        if kw in blob:
-            if kw == "вознагражден" and (
-                    "управленческ" in blob                      # management fee
-                    or not any(d in blob for d in _DEBT_CTX)):  # a plain fee, not interest
-                continue
-            return cat
-    return REVENUE if (t.amount_usd or t.amount) > 0 else OPEX
+    A thin wrapper over categorize_verbose so there is exactly ONE rule table. Vocabulary is
+    deliberately over-inclusive on RU inflection: substring rules must match the case-inflected
+    form that actually appears ("основныХ средств", not "основны средств"), a class of bug this
+    table has shipped three times."""
+    return categorize_verbose(t)[0]
 
 
 # Last-resort related-party hints, used ONLY when the borrower has no KYC ownership list.
@@ -207,6 +298,57 @@ def classify_batch(txns, related_parties=None, model=None, chunk=150) -> dict[st
 
 
 classify_batch.last_stats = {}
+
+
+def classify_hybrid(txns, related_parties=None, model=None, chunk=150) -> dict[str, str]:
+    """Deterministic first; spend the LLM only on rows the vocabulary could not decide.
+
+    `classify_batch` sends every transaction, which wastes the free tier's ~20-request budget
+    re-deriving answers the keyword table already had, and makes the whole borrower's result
+    hostage to one 429. Held-out measurement says the table is ~100% on rows where a rule
+    cleanly fires and a coin-flip on the ~28% where none does, so those rows — plus rows where
+    several categories' vocabulary collided — are the only ones worth an API call.
+
+    Falls back to the deterministic answer for anything the LLM does not return, so a quota
+    failure degrades to exactly the keyword result rather than to nothing."""
+    related = related_parties or set()
+    out: dict[str, str] = {}
+    uncertain = []
+    stats = {"deterministic": 0, "asked": 0, "llm_used": 0, "related_override": 0, "errors": []}
+
+    for t in txns:
+        if _is_related(t.counterparty, related):
+            out[t.txn_id] = RELATED_PARTY
+            stats["related_override"] += 1
+            continue
+        cat, rule, contested = categorize_verbose(t)
+        out[t.txn_id] = cat                      # provisional; may be overwritten below
+        if rule == SIGN_FALLBACK or contested:
+            uncertain.append(t)
+        else:
+            stats["deterministic"] += 1
+
+    stats["asked"] = len(uncertain)
+    for i in range(0, len(uncertain), chunk):
+        part = uncertain[i:i + chunk]
+        try:
+            raw = gemini.generate(_prompt(part, related),
+                                  model=model or config.MODEL_FLASH, system=_SYSTEM,
+                                  json_out=True, temperature=0.0)
+            mp = _parse(raw)
+        except Exception as e:
+            stats["errors"].append(str(e)[:80])
+            continue                              # keep the deterministic answer
+        for t in part:
+            if mp.get(t.txn_id) in _VALID:
+                out[t.txn_id] = mp[t.txn_id]
+                stats["llm_used"] += 1
+
+    classify_hybrid.last_stats = stats
+    return out
+
+
+classify_hybrid.last_stats = {}
 
 
 def make_base_classifier(cat_map: dict[str, str]):

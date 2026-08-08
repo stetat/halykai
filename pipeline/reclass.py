@@ -20,6 +20,16 @@ from .engine import Reclass, OTHER, label_to_category as engine_label_to_categor
 # transaction from the metric it was reclassified into.
 REJECT_RE = re.compile(r"не\s+производил|сохран\w+|без\s+корректир|не\s+переклассифиц", re.I)
 INTERIM_RE = re.compile(r"промежуточн|предварительн|черновик|interim|preliminary", re.I)
+# INTERIM_RE alone mistakes the FINAL report for a draft. The final report's whole point is to
+# say "Настоящий отчёт ЗАМЕНЯЕТ ЛЮБЫЕ ПРОМЕЖУТОЧНЫЕ ведомости" — which contains "промежуточн",
+# so a bare keyword search reads the superseding document as the superseded one. A document that
+# declares it replaces the drafts IS the final one; check that first and let it win.
+_SUPERSEDES_RE = re.compile(r"замен\w+\s+любые\s+промежуточн|"
+                            r"настоящий\s+отчёт\s+замен\w+", re.I)
+# A final document only supersedes the drafts if it actually speaks to classification. Without
+# this guard an unrelated final doc filed under "audits" (a KYC dossier lands there for
+# ACC-7809) would silently void a borrower's only reclassification data.
+_RECLASS_SECTION_RE = re.compile(r"замен\w+\s+любые\s+промежуточн|переклассифиц", re.I)
 
 # One reclassification = one sentence beginning at a TXN id. The sentence terminator is
 # a period NOT followed by a digit: amounts like "($418,204.37)" contain periods, and
@@ -47,41 +57,69 @@ def _amt(s: str | None) -> float | None:
         return None
 
 
+def _parse_reclasses(text: str, want: str) -> list[Reclass]:
+    """Every reclassification sentence in one document, for this borrower only."""
+    found = []
+    for m in RECLASS_RE.finditer(text):
+        txn, body = m.group(1), m.group(2)
+        parts = txn.split("-")
+        # A reclassification only counts for THIS borrower. Documents quote the spec's
+        # example scenario ("TXN-T1-0020") and occasionally other borrowers; ignore both.
+        if want and len(parts) > 1 and parts[1].upper() != want:
+            continue
+        frm = _FROM_RE.search(body)
+        to = _TO_RE.search(body)
+        # APPLIED when the clause states a new category and does not walk it back
+        # ("первоначальная классификация сохраняется", "корректировка не производилась").
+        found.append(Reclass(txn_id=txn,
+                             to_category=_to_cat(to.group(1) if to else None),
+                             from_category=_to_cat(frm.group(1) if frm else None),
+                             applied=bool(to) and not REJECT_RE.search(body)))
+    return found
+
+
 def for_account(acc: str, dm: dict | None = None) -> list[Reclass]:
+    """Reclassifications for one borrower, with the final report outranking the drafts.
+
+    The precedence used to hinge on a `seen_final` set filled only when a FINAL report named
+    the same TXN id. Final reports do not cite TXN ids — they identify a reclassification by
+    amount and counterparty ("Сумма в размере $592,296.10, выплаченная контрагенту Irtysh
+    Advisory Bureau") — so that set stayed empty and a superseded DRAFT won by default.
+
+    Both documents say plainly what should happen. The interim worksheet disclaims itself:
+    "ПРОЕКТ — ПРОМЕЖУТОЧНАЯ ВЕДОМОСТЬ … НЕ ЯВЛЯЕТСЯ ОКОНЧАТЕЛЬНОЙ ПОЗИЦИЕЙ АУДИТОРА … вывод
+    далее не переносится и ПЕРВОНАЧАЛЬНАЯ КЛАССИФИКАЦИЯ СОХРАНЯЕТСЯ. Следует руководствоваться
+    исключительно окончательным отчётом." The final report agrees: "Настоящий отчёт заменяет
+    любые промежуточные ведомости". So once a final report exists, a draft-only reclassification
+    is void — it does not merely rank lower.
+
+    This was not academic: B1's draft moved TXN-B1-0023 ($6,166,592.66) from opex to utilities,
+    and B1 6.2 is max(payroll, utilities) — so the phantom reclass turned a COMPLIANT cell into
+    a BREACH. No existing test could see it, because reconstruct.py synthesises a ledger to fit
+    whatever the engine does and the rehearsal ledger gives that txn a token amount."""
     dm = dm or docmap.build(save=False)
     groups = dm["by_acc"].get(acc, {})
-    # prefer the final audit report over interim worksheets
     audit_docs = groups.get("audits", []) + groups.get("other", [])
-    out: dict[str, Reclass] = {}
-    seen_final: set[str] = set()
-    # A reclassification only counts for THIS borrower. Documents quote the spec's example
-    # scenario ("TXN-T1-0020") and occasionally other borrowers; both must be ignored.
     want = config.ACC_TO_SCENARIO.get(acc, "").upper()
+
+    final_rcs: dict[str, Reclass] = {}
+    interim_rcs: dict[str, Reclass] = {}
+    has_final = False
     for name in audit_docs:
         text = pdftext.extract_text(config.DATASET / name)
-        interim = bool(INTERIM_RE.search(text))
-        for m in RECLASS_RE.finditer(text):
-            txn, body = m.group(1), m.group(2)
-            parts = txn.split("-")
-            if want and len(parts) > 1 and parts[1].upper() != want:
-                continue
-            frm = _FROM_RE.search(body)
-            to = _TO_RE.search(body)
-            # A reclassification is APPLIED when the clause states a new category and does
-            # not walk it back ("первоначальная классификация сохраняется", "корректировка
-            # не производилась"). Interim worksheets still carry real reclassifications —
-            # they are only outranked when a FINAL report speaks about the same txn.
-            applied = bool(to) and not REJECT_RE.search(body)
-            rc = Reclass(txn_id=txn,
-                         to_category=_to_cat(to.group(1) if to else None),
-                         from_category=_to_cat(frm.group(1) if frm else None),
-                         applied=applied)
-            if txn in seen_final and interim:
-                continue                       # a final report already settled this txn
-            out[txn] = rc
-            if not interim:
-                seen_final.add(txn)
-    return list(out.values())
+        interim = (not _SUPERSEDES_RE.search(text)) and bool(INTERIM_RE.search(text))
+        target = interim_rcs if interim else final_rcs
+        for rc in _parse_reclasses(text, want):
+            target[rc.txn_id] = rc
+        if not interim and _RECLASS_SECTION_RE.search(text):
+            has_final = True
+
+    if has_final:
+        # drafts are superseded wholesale, not just where the final report overlaps
+        return list(final_rcs.values())
+    merged = dict(interim_rcs)
+    merged.update(final_rcs)
+    return list(merged.values())
 
 
 # The KYC dossier decides related-party status by an OWNERSHIP THRESHOLD that differs per

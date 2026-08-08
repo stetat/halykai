@@ -99,10 +99,55 @@ def run_keyword():
     print(f"{'ok ' if not gap else 'FAIL'} all formula categories reachable offline"
           + (f" — MISSING {sorted(gap)}" if gap else ""))
 
-    passed = same and not misses and not gap
+    hybrid_ok = run_hybrid_routing()
+
+    passed = same and not misses and not gap and hybrid_ok
     print("\n" + ("DETERMINISTIC CLASSIFIER OK" if passed
                   else "DETERMINISTIC CLASSIFIER REGRESSION"))
     return passed
+
+
+def run_hybrid_routing():
+    """`classify_hybrid` must ask the LLM about the UNDECIDED rows and nobody else — offline.
+
+    The point of the hybrid mode is quota: the free tier allows ~20 requests per window, so
+    re-asking about rows the keyword table already nailed is how a borrower ends up with no
+    answers at all. gemini.generate is stubbed here, so this costs nothing and still pins the
+    routing, the merge, and the degrade-on-failure path."""
+    from . import gemini
+    from .engine import UTILITIES, OPEX
+
+    clean = _mk(901, "KEGOC JSC", "Оплата за электроэнергию за май", -41000)      # rule fires
+    murky = _mk(902, "ТОО Гамма", "Оплата по счёту 12 от 03.07.2025", -5000)      # nothing fires
+    asked: list[str] = []
+
+    real = gemini.generate
+    def fake(prompt, **kw):
+        asked.extend(line.split(" | ")[0] for line in prompt.splitlines()
+                     if line.startswith("TXN-"))
+        return '{"%s": "%s"}' % (murky.txn_id, OPEX)
+    gemini.generate = fake
+    try:
+        out = classifier.classify_hybrid([clean, murky])
+        st = classifier.classify_hybrid.last_stats
+        only_murky = asked == [murky.txn_id]
+        kept = out[clean.txn_id] == UTILITIES
+        used = out[murky.txn_id] == OPEX
+
+        # a dead API must degrade to the keyword answer, never drop the row
+        gemini.generate = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("429"))
+        degraded = classifier.classify_hybrid([clean, murky])
+        safe = (degraded[clean.txn_id] == UTILITIES
+                and degraded[murky.txn_id] == classifier.keyword_category(murky))
+    finally:
+        gemini.generate = real
+
+    for label, cond in (("hybrid asks the LLM only about undecided rows", only_murky),
+                        (f"hybrid keeps the deterministic answer ({st['deterministic']} kept)", kept),
+                        ("hybrid applies the LLM answer to the undecided row", used),
+                        ("hybrid degrades to keywords when the API fails", safe)):
+        print(f"{'ok ' if cond else 'FAIL'} {label}")
+    return only_murky and kept and used and safe
 
 
 def run():

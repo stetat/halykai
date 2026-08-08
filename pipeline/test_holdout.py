@@ -29,8 +29,9 @@ import json
 from collections import Counter, defaultdict
 
 from . import config, engine
-from .classifier import keyword_category
+from .classifier import keyword_category, categorize_verbose, SIGN_FALLBACK
 from .ledger import Txn
+from .heldout_d import HELDOUT_D
 
 R, O, C, L, P = engine.REVENUE, engine.OPEX, engine.CAPEX, engine.LEASE, engine.PAYROLL
 U, T, I, N, F = (engine.UTILITIES, engine.TAX, engine.INTEREST,
@@ -252,6 +253,43 @@ def part2_rule_generality() -> tuple[int, int]:
     return corroborated, len(cells)
 
 
+def part3_provenance() -> None:
+    """How many answers were EARNED by a rule, and how many fell out of the amount's sign?
+
+    The sign fallback returns revenue for any unmatched credit and opex for any unmatched
+    debit. On a ledger that is mostly debits it is right often enough to prop up an accuracy
+    score while knowing nothing. Splitting the two apart is the difference between "the
+    classifier handles this" and "the arithmetic of the test set happened to agree"."""
+    print("\n\nPART 3 — was the answer earned, or guessed from the sign?")
+    print("-" * 78)
+    pooled = HELDOUT + HELDOUT_B + HELDOUT_C
+    buckets: dict[str, list[int]] = defaultdict(lambda: [0, 0])   # [correct, total]
+    contested_wrong: list[tuple[str, str, str]] = []
+    for desc, cp, want, inflow in pooled:
+        t = _mk(desc, cp, inflow)
+        got, rule, contested = categorize_verbose(t)
+        key = ("sign-fallback" if rule == SIGN_FALLBACK
+               else "contested" if contested else "clean rule")
+        buckets[key][1] += 1
+        if got == want:
+            buckets[key][0] += 1
+        elif contested:
+            contested_wrong.append((desc, want, got))
+
+    for key in ("clean rule", "contested", "sign-fallback"):
+        hit, n = buckets[key]
+        if not n:
+            continue
+        print(f"  {key:<15} {hit:>3}/{n:<3} = {hit / n:>6.1%}   ({n / len(pooled):.0%} of items)")
+    sf = buckets["sign-fallback"]
+    print(f"\n  {sf[1]} of {len(pooled)} pooled items ({sf[1] / len(pooled):.0%}) carry NO vocabulary")
+    print("  match at all — their category is inferred from the sign of the amount alone.")
+    if contested_wrong:
+        print("\n  contested items decided wrongly by _RULES ordering:")
+        for desc, want, got in contested_wrong:
+            print(f"    want {want:<10} got {got:<11} | {desc[:52]}")
+
+
 def main() -> None:
     print("=" * 78)
     print("OUT-OF-SAMPLE EVALUATION")
@@ -264,7 +302,11 @@ def main() -> None:
     print()
     c_ok, c_tot = part1_classifier(HELDOUT_C, "PART 1C (BURNED — the вознаграждение-precision "
                                               "and stem repairs were fitted to this set)")
+    print()
+    d_ok, d_tot = part1_classifier(HELDOUT_D, "PART 1D (BLIND — written by an agent that never "
+                                              "read the keyword table)")
     corr, ncells = part2_rule_generality()
+    part3_provenance()
 
     print("\n\n" + "=" * 78)
     print("HONEST SUMMARY")
@@ -272,12 +314,13 @@ def main() -> None:
     # ALL THREE sets are now training data. The only out-of-sample numbers this repo will ever
     # have from them are the FIRST-CONTACT scores, recorded here so they cannot be quietly
     # replaced by the flattering post-fix ones. Their mean is the accuracy estimate to plan on.
-    first = [("A", 27, 35), ("B", 25, 30), ("C", 19, 24)]
+    first = [("A", 27, 35), ("B", 25, 30), ("C", 19, 24), ("D", 42, 60)]
     print("  Every set was written BEFORE the round of fixes it motivated, and burned by them.")
     print("  A set's value is its FIRST-CONTACT score; the post-fix score is self-congratulation.\n")
     print(f"  {'set':<5} {'first contact':>16}   {'now (burned)':>14}")
     for name, fo, ft in first:
-        now = {"A": (a_ok, a_tot), "B": (b_ok, b_tot), "C": (c_ok, c_tot)}[name]
+        now = {"A": (a_ok, a_tot), "B": (b_ok, b_tot),
+               "C": (c_ok, c_tot), "D": (d_ok, d_tot)}[name]
         print(f"  {name:<5} {f'{fo}/{ft} = {fo / ft:.1%}':>16}   "
               f"{f'{now[0]}/{now[1]} = {now[0] / now[1]:.1%}':>14}")
     fo, ft = sum(x[1] for x in first), sum(x[2] for x in first)
