@@ -123,7 +123,11 @@ def build(scenarios: list[str] | None = None, use_llm: bool = True, save: bool =
             result[sc] = entry
             continue
         for cid, ctext in clause_texts(contract).items():
-            spec = {"clause": cid, "raw_text": ctext[:600]}
+            # Keep the WHOLE clause: engine.classify_kind / ratio_formula / spec_categories
+            # all read raw_text, and the metric-defining sentence is often the last one
+            # ("Соблюдение проверяется по наибольшей из указанных сумм"). Three clauses
+            # already exceed 600 chars, so truncating here silently changes the metric.
+            spec = {"clause": cid, "raw_text": ctext}
             spec.update(parse_threshold(ctext))   # deterministic, free, exact
             if use_llm:
                 try:

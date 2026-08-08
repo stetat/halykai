@@ -17,6 +17,10 @@ YEAR_COV_RE = re.compile(r"с (20\d{2})-01-01 по (20\d{2})-12-31")
 CONTRACT_RE = re.compile(r"ДОГОВОР БАНКОВСКОГО ЗАЙМА")
 AUDIT_RE = re.compile(r"аудит|независим\w+ заключени|финансов\w+ отч[её]тност", re.I)
 KYC_RE = re.compile(r"KYC|клиентск\w+ дось|идентификаци\w+ клиента|надлежащ\w+ проверк", re.I)
+# A dossier is identified by its registration number / title, not by loose keywords. Needed
+# because the dossiers mention "финансовой отчётностью" and so also match AUDIT_RE — the
+# elif routing below then filed them under "audits" (ACC-7809's dossier ended up there).
+STRONG_KYC_RE = re.compile(r"KYC-ACC-\d{4}|Досье\s+«?Знай своего клиент", re.I)
 
 
 @dataclass
@@ -31,6 +35,7 @@ class Doc:
     cov_year: int | None = None
     outdated: bool = False
     n_dead_markers: int = 0
+    is_kyc_dossier: bool = False       # the authoritative ownership file, not a procedure
 
 
 def classify(path: Path) -> Doc:
@@ -53,6 +58,7 @@ def classify(path: Path) -> Doc:
         is_kyc=bool(KYC_RE.search(text)),
         has_covenants=has_cov, cov_year=year,
         outdated=outdated, n_dead_markers=n_dead,
+        is_kyc_dossier=bool(STRONG_KYC_RE.search(text)),
     )
 
 
@@ -64,6 +70,8 @@ def build(save: bool = True) -> dict:
             by_acc.setdefault(acc, {"contracts": [], "audits": [], "kyc": [], "other": []})
             if d.has_covenants and d.is_contract:
                 by_acc[acc]["contracts"].append(d.name)
+            elif d.is_kyc_dossier:        # strongest signal wins, before the audit keywords
+                by_acc[acc]["kyc"].append(d.name)
             elif d.is_audit:
                 by_acc[acc]["audits"].append(d.name)
             elif d.is_kyc:
@@ -80,10 +88,21 @@ def build(save: bool = True) -> dict:
         live.sort(key=lambda n: (doc_by_name[n].cov_year != 2025, n))
         current_contract[acc] = live[0] if live else None
 
+    # Losing a borrower's contract costs all 3 of its cells, so say so rather than
+    # emitting an empty covenant set that looks like "this borrower has no covenants".
+    missing = [acc for acc in config.SCENARIO_TO_ACC.values()
+               if not current_contract.get(acc)]
+    for acc in missing:
+        n_out = len([n for n in by_acc.get(acc, {}).get("contracts", [])
+                     if doc_by_name[n].outdated])
+        print(f"!! {acc}: NO live contract selected ({n_out} outdated candidate(s)). "
+              f"Its 3 covenant cells will be empty — check docmap.CONTRACT_RE/DEAD_RE.")
+
     result = {
         "docs": {d.name: asdict(d) for d in docs},
         "by_acc": by_acc,
         "current_contract": current_contract,
+        "accounts_without_contract": missing,
         "scenario_current_contract": {
             sc: current_contract.get(acc)
             for sc, acc in config.SCENARIO_TO_ACC.items()

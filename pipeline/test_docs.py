@@ -11,7 +11,7 @@ import json
 import pathlib
 import re
 
-from . import config, docmap, reclass
+from . import config, covenants, docmap, pdftext, reclass
 
 FAILURES: list[str] = []
 _DM = docmap.build(save=False)
@@ -86,6 +86,37 @@ print(f"\nRelated-party lists resolved for {resolved}/12 borrowers "
       f"(P2 and P6 ship no ownership dossier in this release).")
 check("related parties resolved for every borrower whose dossier exists", resolved >= 10,
       f"got {resolved}")
+
+# --- document routing & clause slicing --------------------------------------------------
+check("every borrower has a live 2025 contract selected",
+      not _DM.get("accounts_without_contract"),
+      f"missing {_DM.get('accounts_without_contract')}")
+
+for sc, acc in config.SCENARIO_TO_ACC.items():
+    d = _DM["docs"].get(_DM["current_contract"].get(acc) or "", {})
+    check(f"{sc}: current contract is the 2025 edition, not the 2024 decoy",
+          d.get("cov_year") == 2025 and not d.get("outdated"),
+          f"year={d.get('cov_year')} outdated={d.get('outdated')}")
+
+# Clause slicing: exactly one chunk per clause id. A duplicate would mean a cross-reference
+# elsewhere in the contract silently OVERWRITES the real clause (last write wins).
+for sc, acc in config.SCENARIO_TO_ACC.items():
+    contract = _DM["current_contract"][acc]
+    text = pdftext.extract_text(config.DATASET / contract)
+    ids = [m.group(1) for m in
+           (re.match(r"Пункт\s+(6\.[123])", ch) for ch in covenants.CLAUSE_RE.findall(text))
+           if m]
+    check(f"{sc}: exactly one text chunk per clause 6.1/6.2/6.3",
+          sorted(ids) == ["6.1", "6.2", "6.3"], f"got {ids}")
+
+# raw_text must carry the WHOLE clause — the metric-defining sentence is often last.
+_specs = covenants.build(use_llm=False, save=False)
+for sc, acc in config.SCENARIO_TO_ACC.items():
+    full = covenants.clause_texts(_DM["current_contract"][acc])
+    for cid, ctext in full.items():
+        stored = _specs[sc]["covenants"][cid]["raw_text"]
+        check(f"{sc} {cid}: raw_text is not truncated", stored == ctext,
+              f"stored {len(stored)} of {len(ctext)} chars")
 
 print()
 if FAILURES:
