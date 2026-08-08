@@ -59,9 +59,8 @@ Only holders at or above that bar qualify. The dossiers are seeded with near-mis
 a stake shown as 48.0% in the table is held indirectly, with the Group's real voting rights
 disclosed further down as 27.3% — below that dossier's 30.0% bar, so it does **not** qualify.
 Previously `related_parties()` returned every company name in the file, which inflates all
-12 related-party cells. 10/12 borrowers resolve.
-
-All 12 borrowers resolve — but **two of them only via images** (see below).
+12 related-party cells. All 12 borrowers now resolve — but **two of them only via images**
+(see below).
 
 ## The deepest trap: covenant data hidden inside IMAGES
 `pdftotext` returns nothing for an image, so a text-only pipeline reads these documents as
