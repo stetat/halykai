@@ -34,23 +34,63 @@ _SYSTEM = ("Ты финансовый аналитик банка. Класси�
            "для проверки кредитных ковенантов. Отвечай СТРОГО одним JSON-объектом без пояснений.")
 
 
+# Consumables and services stay OPEX even when a capital-asset noun is nearby: the asset word
+# is usually just naming a LOCATION ("спецодежда для персонала СКЛАДА" bought a jacket, not a
+# warehouse). Checked before capex because the capex test is bag-of-words, not syntactic.
+_CONSUMABLE = ("спецодежд", "канцтовар", "расходн материал", "гсм", "запчаст",
+               "хозяйствен", "инвентар", "питьев", "униформ")
+
+# Strong enough to mean capex on their own — you do not "reconstruct" or "modernise" an
+# operating expense, and these appear with asset nouns too varied to enumerate ("цех", "путь").
+# NB "строитель" — the common prefix of "строительСТВо" and "строительНО-монтажные". Neither
+# longer form covers the other; matching the shared STEM rather than one inflection is the fix
+# for a bug this table has now shipped three times (ср. "оплатУ труда", "основныХ средств").
+_CAPEX_STRONG = ("капитальн", "capex", "строитель", "реконструкц", "модерниз",
+                 "основные фонды", "капремонт", "возведен", "дооборудован")
+
+# "Вознаграждение" only means INTEREST next to a debt: on its own it is an ordinary fee
+# ("комиссионное вознаграждение агента") or remuneration ("вознаграждение членам совета
+# директоров"). Mapping it unconditionally cost as many cells as it fixed, and mis-routed
+# money into INTEREST — a denominator in nine RATIO covenants.
+_DEBT_CTX = ("займ", "кредит", "облигац", "овердрафт", "транш", "ссуд", "loan", "facility")
+_BUY = ("приобрет", "покупк", "закуп", "поставк", "монтаж")
+_ASSET = ("оборудован", "техник", "кран", "тягач", "грузов", "погрузчик", "машин",
+          "автопарк", "транспортн", "корпус", "здани", "склад", "экскаватор",
+          "станок", "установк", "сооружен", "лини сортировк", "линии сортировк")
+
+
 def keyword_category(t) -> str:
     """Deterministic categoriser: free, offline, and the ONLY thing running whenever the
     Gemini free tier 429s. It is therefore a primary classifier, not just a fallback —
     `solve.base_classifier` is this function. Keep the two paths identical; they silently
-    diverged once (a stale copy in solve.py scored 23% against this one's 100%)."""
+    diverged once (a stale copy in solve.py scored 23% against this one's 100%).
+
+    Vocabulary is deliberately over-inclusive on RU inflection: substring rules must match
+    the case-inflected form that actually appears ("основныХ средств", not "основны средств"),
+    a class of bug this table has shipped twice."""
     blob = f"{t.counterparty} {t.description}".lower()
-    # capex: an acquisition/construction verb near a capital-asset noun (checked first)
-    buy = any(w in blob for w in ("приобрет", "покупк", "закуп", "строительств",
-                                  "реконструкц", "модерниз", "капитальн"))
-    asset = any(w in blob for w in ("оборудован", "техник", "кран", "тягач", "грузов",
-                                    "погрузчик", "машин", "автопарк", "транспортн",
-                                    "корпус", "здани", "склад", "основны средств"))
-    if (buy and asset) or "капитальн" in blob or "строительств" in blob or "capex" in blob:
+
+    if any(w in blob for w in _CONSUMABLE):
+        return OPEX
+    # "основных/основного средства" — match the stem pair, never a fixed inflection
+    fixed_assets = "основн" in blob and "средств" in blob
+    if (any(w in blob for w in _BUY) and any(w in blob for w in _ASSET)) \
+            or any(w in blob for w in _CAPEX_STRONG) or fixed_assets:
         return CAPEX
+
+    # Statutory payroll deductions appear as bare abbreviations, which need word boundaries —
+    # as substrings they would fire inside unrelated words. ("СО" for социальные отчисления is
+    # deliberately absent: "со" is a Russian preposition.) Tax words still take precedence.
+    if re.search(r"\b(опв|осмс|впосмс)\b", blob) and not any(
+            w in blob for w in ("налог", "ндс", "кпн")):
+        return PAYROLL
+
     rules = [("аренд", LEASE), ("лизинг", LEASE), ("lease", LEASE),
-             ("процент", INTEREST), ("interest", INTEREST),
-             ("налог", TAX), ("tax", TAX),
+             # "вознаграждение" is the standard KZ banking word for INTEREST, but
+             # "управленческое вознаграждение" is a management fee — excluded below.
+             ("процент", INTEREST), ("interest", INTEREST), ("вознагражден", INTEREST),
+             ("налог", TAX), ("tax", TAX), ("ндс", TAX), ("vat", TAX), ("кпн", TAX),
+             ("пошлин", TAX), ("госдоход", TAX),
              ("водоснаб", UTILITIES), ("водоотвед", UTILITIES), ("коммунал", UTILITIES),
              ("электро", UTILITIES), ("тепло", UTILITIES), ("газоснаб", UTILITIES), ("utility", UTILITIES),
              ("страхов", INSURANCE), ("insurance", INSURANCE),
@@ -58,11 +98,21 @@ def keyword_category(t) -> str:
              # "Расходы на оплатУ труда" matches — the inflected form broke the substring.
              ("труда", PAYROLL), ("персонал", PAYROLL), ("зарплат", PAYROLL),
              ("заработн", PAYROLL), ("payroll", PAYROLL), ("фот", PAYROLL),
-             ("финансирован", FINANCING), ("займ", FINANCING), ("кредитн", FINANCING), ("транш", FINANCING),
+             ("пенсионн", PAYROLL), ("сотрудник", PAYROLL), ("трудов", PAYROLL),
+             ("работник", PAYROLL), ("отпускн", PAYROLL), ("отпуск", PAYROLL),
+             ("материальной помощи", PAYROLL), ("больничн", PAYROLL),
+             ("совета директоров", PAYROLL),
+             ("финансирован", FINANCING), ("займ", FINANCING), ("кредитн", FINANCING),
+             ("транш", FINANCING), ("drawdown", FINANCING), ("credit facility", FINANCING),
+             ("loan", FINANCING), ("borrowing", FINANCING), ("tranche", FINANCING),
              ("выручк", REVENUE), ("продаж", REVENUE), ("реализац", REVENUE), ("revenue", REVENUE),
              ("операционн", OPEX), ("opex", OPEX)]
     for kw, cat in rules:
         if kw in blob:
+            if kw == "вознагражден" and (
+                    "управленческ" in blob                      # management fee
+                    or not any(d in blob for d in _DEBT_CTX)):  # a plain fee, not interest
+                continue
             return cat
     return REVENUE if (t.amount_usd or t.amount) > 0 else OPEX
 
