@@ -15,6 +15,7 @@ stream is already `filter byte + row` per row — exactly PNG's IDAT payload —
 repackaged into a valid PNG without decoding the filters or any image library.
 """
 from __future__ import annotations
+import json
 import re
 import struct
 import zlib
@@ -91,6 +92,66 @@ def dump(out_dir: Path | None = None, min_pixels: int = 200_000) -> list[Path]:
             p.write_bytes(png)
             written.append(p)
     return written
+
+
+_VISION_PROMPT = (
+    "Это скан или изображение из кредитного досье казахстанского банка. Извлеки ВСЕ данные, "
+    "относящиеся к проверке финансовых ковенантов, и верни СТРОГО один JSON-объект.\n"
+    "Обязательно извлекай, если присутствует:\n"
+    "  ownership_threshold_pct — порог владения для признания связанной стороной "
+    "(«владеет N% и более … признаются связанными сторонами»)\n"
+    "  holdings_pct — {название организации: доля в %} из таблицы владения. Если в сноске "
+    "указано, что доля удерживается КОСВЕННО и реальные права голоса иные — верни реальные "
+    "права голоса и опиши это в notes.\n"
+    "  ebitda_addback_floor_usd и one_off_items_usd — {название: сумма} для разовых статей\n"
+    "  pledged_threshold_pct и subsidiary_pledged_pct — {название: % активов в залоге}\n"
+    "  notes — любые оговорки, сноски и условия, меняющие трактовку\n"
+    "Числа возвращай как числа, без разделителей тысяч и без знака %. "
+    "Не выдумывай отсутствующие поля — просто опусти их."
+)
+
+
+def untranscribed_image_docs(facts_path=None, min_pixels: int = 200_000) -> list[tuple[str, int]]:
+    """Documents carrying a sizeable image that NOBODY has transcribed.
+
+    This is the dataset's most dangerous failure mode and the only one that is completely
+    silent: pdftotext returns nothing for an image, so a document whose ownership table or
+    add-back schedule lives in a picture reads as an ordinary file with no covenant data, and
+    the pipeline reports a confident wrong answer instead of an error. Four such documents were
+    found by hand and live in image_facts.json. Any OTHER document with a big image is one
+    nobody has looked at — worth shouting about even when no OCR is available."""
+    import json as _json
+    facts_path = facts_path or (config.ROOT / "image_facts.json")
+    covered = ""
+    if Path(facts_path).exists():
+        covered = _json.dumps(_json.loads(Path(facts_path).read_text(encoding="utf-8")),
+                              ensure_ascii=False)
+    return [(name, n) for name, n in find_image_docs(min_pixels) if name not in covered]
+
+
+def transcribe(doc: str, model: str | None = None, min_pixels: int = 200_000) -> dict:
+    """Read a document's embedded images with the model's vision. Cached; costs one call.
+
+    The hand-written entries in image_facts.json stay authoritative — they were checked against
+    the pictures by eye. This exists for the images an event-day dataset carries that nobody has
+    seen, where the alternative is not a worse answer but no answer at all."""
+    from . import gemini
+    imgs = [png for w, h, _c, png in images_in(config.DATASET / doc) if w * h >= min_pixels]
+    if not imgs:
+        return {}
+    raw = gemini.generate(_VISION_PROMPT, model=model, images=imgs,
+                          json_out=True, temperature=0.0)
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
+    try:
+        out = json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", raw, re.S)
+        out = json.loads(m.group(0)) if m else {}
+    if out:
+        out["source"] = f"{doc} (transcribed by model vision, NOT verified by eye)"
+    return out
 
 
 if __name__ == "__main__":

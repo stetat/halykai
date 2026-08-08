@@ -3,6 +3,7 @@
 Supports both auth styles because the supplied key may be an AI Studio API key
 (?key=...) or an OAuth/session token (Authorization: Bearer ...)."""
 from __future__ import annotations
+import base64
 import hashlib
 import json
 import re
@@ -62,18 +63,35 @@ def _request(model: str, payload: dict) -> dict:
 
 def generate(prompt: str, *, model: str | None = None, system: str | None = None,
              temperature: float = 0.0, json_out: bool = False,
-             use_cache: bool = True, max_retries: int = 4) -> str:
-    """Return model text for a prompt. Caches by (model, system, prompt)."""
+             use_cache: bool = True, max_retries: int = 4,
+             images: list[bytes] | None = None) -> str:
+    """Return model text for a prompt. Caches by (model, system, prompt[, images]).
+
+    `images` are raw PNG bytes sent as inline_data parts. This dataset hides covenant-critical
+    tables inside images that pdftotext cannot see, and there is no OCR in the stdlib, so the
+    model's own vision is the only way to read an image nobody has transcribed by hand. Image
+    bytes are folded into the cache key: a transcription is paid for once and then free, which
+    matters on a free tier of roughly twenty requests per window."""
     model = model or config.MODEL_FLASH
-    cp = _cache_path(model, prompt, system, temperature, json_out)
+    key_extra = ""
+    if images:
+        h = hashlib.sha256()
+        for b in images:
+            h.update(b)
+        key_extra = f"\x00img:{h.hexdigest()[:32]}"
+    cp = _cache_path(model, prompt + key_extra, system, temperature, json_out)
     if use_cache and cp.exists():
         return json.loads(cp.read_text(encoding="utf-8"))["text"]
 
     gen_cfg: dict = {"temperature": temperature}
     if json_out:
         gen_cfg["responseMimeType"] = "application/json"
+    parts: list[dict] = [{"text": prompt}]
+    for b in images or []:
+        parts.append({"inline_data": {"mime_type": "image/png",
+                                      "data": base64.b64encode(b).decode("ascii")}})
     payload: dict = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "contents": [{"role": "user", "parts": parts}],
         "generationConfig": gen_cfg,
     }
     if system:

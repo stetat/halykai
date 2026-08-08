@@ -10,6 +10,7 @@
       --classifier hybrid    keyword + ask Gemini ONLY about rows no rule decided (~28%)
       --classifier gemini    ask Gemini about every row (most quota, 429s soonest)
   python -m pipeline.cli score [submission.json]   # score vs answer key
+  python -m pipeline.cli ocr [file.pdf ...]  # read images nobody has transcribed (uses quota)
 """
 from __future__ import annotations
 import sys
@@ -58,6 +59,42 @@ def cmd_specs(args):
     print(f"\nWrote covenant_specs.json ({'with LLM' if use_llm else 'regex only'}).")
 
 
+def cmd_ocr(args):
+    """Transcribe embedded images with the model's vision.
+
+    Only for images nobody has read by eye — the hand-checked entries in image_facts.json stay
+    authoritative, because a transcription verified against the picture beats one that was not.
+    Writes cache/image_facts_ocr.json rather than editing image_facts.json in place, so model
+    output can never quietly overwrite a verified fact."""
+    import json
+    from . import pdfimages
+    targets = [a for a in args if not a.startswith("-")]
+    todo = ([(t, 0) for t in targets] if targets
+            else pdfimages.untranscribed_image_docs())
+    if not todo:
+        print("Every document carrying a sizeable image is already transcribed in "
+              "image_facts.json. Nothing to do.")
+        print("Pass a filename to re-transcribe one anyway.")
+        return
+    out_path = config.CACHE / "image_facts_ocr.json"
+    out = {}
+    if out_path.exists():
+        out = json.loads(out_path.read_text(encoding="utf-8"))
+    for name, _ in todo:
+        print(f"reading {name} ...")
+        try:
+            got = pdfimages.transcribe(name)
+        except Exception as e:
+            print(f"!! {name}: {e}")
+            continue
+        if got:
+            out[name] = got
+            print(json.dumps(got, ensure_ascii=False, indent=2)[:900])
+    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\nWrote {out_path}. UNVERIFIED — check each value against the PNG in "
+          f"cache/images/ before copying it into image_facts.json.")
+
+
 def cmd_score(args):
     from . import scorer
     files = [a for a in args if not a.startswith("-")]
@@ -84,16 +121,20 @@ def cmd_solve(args):
             opts[a] = args[i + 1]
     sub = solve.solve(opts["--ledger"], opts["--fx"],
                       classifier_mode=opts["--classifier"])
-    filled = sum(1 for sc in sub["answers"].values()
-                 for c in sc.values() if c["status"] in ("COMPLIANT", "BREACH"))
-    print(f"Wrote submission.json — {filled}/36 cells computed "
+    # not /36: the borrower set now comes from the ledger, so the cell count is whatever the
+    # data says it is (12 borrowers x 3 clauses here, but a 13th would make it 39)
+    cells = [c for sc in sub["answers"].values() for c in sc.values()]
+    filled = sum(1 for c in cells if c["status"] in ("COMPLIANT", "BREACH"))
+    print(f"Wrote submission.json — {filled}/{len(cells)} cells computed "
           f"({'ledger supplied' if opts['--ledger'] else 'no ledger: skeleton only'}).")
-    if opts["--ledger"] and filled < 36:
-        print(f"!! {36 - filled} cells are EMPTY and score 0 — investigate before submitting.")
+    if filled < len(cells):
+        print(f"!! {len(cells) - filled} cells are EMPTY and score 0 — investigate before "
+              f"submitting.")
 
 
 COMMANDS = {"check": cmd_check, "map": cmd_map, "specs": cmd_specs,
-            "validate": cmd_validate, "solve": cmd_solve, "score": cmd_score}
+            "validate": cmd_validate, "solve": cmd_solve, "score": cmd_score,
+            "ocr": cmd_ocr}
 
 
 def main():

@@ -116,6 +116,25 @@ check("no cell is left without an actual",
 check("the team name is set, not the spec placeholder", _sub["team"] != "your-team-name",
       f"got {_sub['team']!r}")
 
+# Images are the dataset's only silent failure mode: pdftotext returns nothing, so a document
+# whose ownership table is a picture reads as an ordinary file with no covenant data and the
+# pipeline reports a confident zero. Four such documents exist here and are transcribed. Any
+# OTHER document with a sizeable image is one nobody has read.
+_unread = pdfimages.untranscribed_image_docs()
+check("every document carrying a sizeable image is transcribed", not _unread,
+      f"unread: {_unread}")
+
+# Verified transcriptions must outrank model-vision ones. `cli ocr` writes to a separate cache
+# file precisely so unverified output can never overwrite a fact checked against the picture.
+_ocr = config.CACHE / "image_facts_ocr.json"
+if _ocr.exists():
+    import json as _j
+    _raw = _j.loads(_ocr.read_text(encoding="utf-8"))
+    _verified = _j.loads((config.ROOT / "image_facts.json").read_text(encoding="utf-8"))
+    _facts = reclass.image_facts()
+    check("model-vision transcriptions never override a hand-verified account",
+          all(_facts.get(a) == v for a, v in _verified.items() if not a.startswith("_")))
+
 # --- related parties --------------------------------------------------------------------
 # Membership is an ownership threshold in the KYC dossier, and the thresholds differ per
 # borrower. Entities listed BELOW the bar are decoys and must be excluded.

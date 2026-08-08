@@ -89,6 +89,33 @@ def _report_classifier_coverage(txns) -> None:
             print(f"     sample: {t.counterparty} | {t.description[:58]}")
 
 
+def _report_untranscribed_images() -> None:
+    """Shout about images nobody has read. The one failure mode with no symptom.
+
+    pdftotext returns nothing for an image, so a document whose ownership table or EBITDA
+    add-back schedule lives in a picture reads as an ordinary file carrying no covenant data.
+    The pipeline then reports a confident wrong answer — zero related-party spend, no add-back —
+    with no error anywhere. Four such documents were found by hand in this release and are
+    transcribed in image_facts.json. Any other document with a sizeable image is one nobody has
+    looked at."""
+    try:
+        from . import pdfimages
+        unread = pdfimages.untranscribed_image_docs()
+    except Exception as e:
+        print(f"   (could not scan for embedded images: {e})")
+        return
+    if not unread:
+        return
+    print(f"!! {len(unread)} document(s) carry a sizeable image with NO transcription in "
+          f"image_facts.json. pdftotext cannot see inside them, so any covenant data there is "
+          f"being silently dropped:")
+    for name, n in unread:
+        print(f"     {name}  ({n} image(s))")
+    print("     Fix: `python -m pipeline.pdfimages` writes them to cache/images/ — LOOK at "
+          "them and add to image_facts.json, or run `python -m pipeline.cli ocr` to have the "
+          "model transcribe them (costs quota, and its output is unverified).")
+
+
 def _adopt_ledger_scenarios(txns) -> None:
     """Let the ledger, not a hardcoded constant, decide which borrowers exist.
 
@@ -180,6 +207,7 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
 
     dm = docmap.build(save=True)
     specs = covenants.build(use_llm=False, save=True)   # regex specs (free, exact thresholds)
+    _report_untranscribed_images()
 
     txns_by_sc = {}
     if ledger_path:

@@ -211,12 +211,42 @@ def _clean_name(s: str) -> str:
 
 
 def image_facts() -> dict:
-    """Determinations that live only inside embedded images (see pipeline/pdfimages.py)."""
+    """Determinations that live only inside embedded images (see pipeline/pdfimages.py).
+
+    Two sources, and the precedence matters. `image_facts.json` was transcribed by reading the
+    pictures by eye and is authoritative. `cache/image_facts_ocr.json` is what the model's
+    vision read from images nobody has checked, written by `cli ocr`; it fills accounts the
+    verified file does not mention and never overrides one it does. Against this release's four
+    known images the model reproduced every threshold and amount exactly, but it also prefixed
+    party names with their descriptions in one case — harmless for an add-back, where only
+    amounts and the floor are read, and wrong for an ownership table, where names are matched
+    against ledger counterparties. So: verified first, model second, and the model's entries
+    stay labelled as unverified."""
     p = config.ROOT / "image_facts.json"
-    if not p.exists():
-        return {}
-    return {k: v for k, v in json.loads(p.read_text(encoding="utf-8")).items()
-            if not k.startswith("_")}
+    verified = {}
+    if p.exists():
+        verified = {k: v for k, v in json.loads(p.read_text(encoding="utf-8")).items()
+                    if not k.startswith("_")}
+    ocr_path = config.CACHE / "image_facts_ocr.json"
+    if not ocr_path.exists():
+        return verified
+    try:
+        raw = json.loads(ocr_path.read_text(encoding="utf-8"))
+    except Exception:
+        return verified
+    # cli ocr keys by DOCUMENT; map each onto its account, and only where nothing verified exists
+    out = dict(verified)
+    dm = docmap.build(save=False)
+    for doc, facts in raw.items():
+        acc = (dm.get("docs", {}).get(doc) or {}).get("account")
+        if not acc:
+            for a, groups in dm.get("by_acc", {}).items():
+                if any(doc in names for names in groups.values()):
+                    acc = a
+                    break
+        if acc and acc not in out:
+            out[acc] = facts
+    return out
 
 
 def _related_from_image(acc: str) -> set[str]:
