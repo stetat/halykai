@@ -235,6 +235,29 @@ def test_refunds_net_against_their_category():
     print("ok  refunds and credit notes net against a category, they do not add to it")
 
 
+def test_evidence_can_be_a_plain_transaction_not_a_reclassification():
+    # B1 6.1's key evidence is TXN-B1-0020 while B1's only applied reclassification is
+    # TXN-B1-0023, so evidence is "the transaction whose exclusion flips the verdict",
+    # not "the reclassification that flips it". Here nothing is reclassified at all.
+    txns = [
+        _t("TXN-X-0001", -900_000, cp="Affiliate LLP", desc="management fee"),
+        _t("TXN-X-0002", -60_000, cp="Affiliate LLP", desc="shared services"),
+        _t("TXN-X-0003", -400_000, desc="opex operating"),
+    ]
+    catf = Categorizer(_base_classifier({"opex": OPEX}), reclasses=[],
+                       related_parties={"Affiliate LLP"})
+    spec = {"name": "Максимальные платежи связанным сторонам", "operator": "<=",
+            "threshold": 500_000.0, "unit": "usd",
+            "raw_text": "совокупный объём платежей в пользу связанных сторон"}
+    r = engine.evaluate(spec, txns, catf, reclasses=[])
+    assert r.kind == "RELATED_PARTY_ABS", r.kind
+    assert abs(r.actual - 960_000) < 0.005, r.actual
+    assert r.status == "BREACH", r.status
+    # only dropping the 900k payment brings 960k under the 500k cap (dropping 60k leaves 900k)
+    assert r.evidence_txn_id == "TXN-X-0001", r.evidence_txn_id
+    print("ok  evidence found for a decisive plain transaction (no reclassification)")
+
+
 def test_reclassified_category_labels_resolve():
     # pdftotext breaks labels across lines; a literal-space pattern misses them, and the
     # whole vocabulary must be covered or a reclassification lands in the unread OTHER bin.
@@ -251,6 +274,7 @@ def test_reclassified_category_labels_resolve():
 def main():
     test_capex_intensity_ratio_and_no_evidence()
     test_refunds_net_against_their_category()
+    test_evidence_can_be_a_plain_transaction_not_a_reclassification()
     test_reclassified_category_labels_resolve()
     test_reclassification_flips_and_is_the_evidence()
     test_rejected_reclassification_is_not_evidence()
