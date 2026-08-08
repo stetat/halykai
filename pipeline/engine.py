@@ -55,26 +55,38 @@ def _norm_party(s: str) -> str:
 
 class Categorizer:
     def __init__(self, base: Classifier, reclasses: list[Reclass],
-                 related_parties: set[str] | None = None):
+                 related_parties: set[str] | None = None,
+                 unrestricted_parties: set[str] | None = None):
         self.base = base
         self.related = {p for p in (_norm_party(r) for r in (related_parties or set())) if p}
+        # Subsidiaries outside the security perimeter. Like related parties this is an
+        # IDENTITY test — no description classifier can tell which subsidiary is
+        # unrestricted, it is decided by the pledged-asset share in the KYC dossier.
+        self.unrestricted = {p for p in (_norm_party(r) for r in (unrestricted_parties or set())) if p}
         self._applied = {r.txn_id: r.to_category for r in reclasses if r.applied}
 
-    def _is_related(self, counterparty: str) -> bool:
-        cp = _norm_party(counterparty)
+    @staticmethod
+    def _matches(cp: str, names: set[str]) -> bool:
         if not cp:
             return False
         # exact, else containment either way (guarded by length so short tokens can't match)
         return any(cp == r or (len(r) >= 6 and r in cp) or (len(cp) >= 6 and cp in r)
-                   for r in self.related)
+                   for r in names)
+
+    def _is_related(self, counterparty: str) -> bool:
+        return self._matches(_norm_party(counterparty), self.related)
 
     def category(self, t: Txn, ignore_reclass: str | None = None) -> str:
         if t.txn_id in self._applied and t.txn_id != ignore_reclass:
             return self._applied[t.txn_id]
-        # base classification; related-party membership overrides on the counterparty axis.
-        # The contracts are explicit that this is an identity test, not a description test.
-        if self._is_related(t.counterparty):
+        # base classification; identity overrides on the counterparty axis. The contracts
+        # are explicit that these are identity tests, not description tests. Related-party
+        # wins: "учитывается в полном объёме независимо от категории расходов".
+        cp = _norm_party(t.counterparty)
+        if self._matches(cp, self.related):
             return RELATED_PARTY
+        if self._matches(cp, self.unrestricted):
+            return UNRESTRICTED_ASSETS
         return self.base(t)
 
 
@@ -93,16 +105,20 @@ def _sum(txns: list[Txn], cat: str, catf: Categorizer, ignore: str | None = None
     return abs(sum(_amt(t) for t in txns if catf.category(t, ignore_reclass=ignore) == cat))
 
 
-def _cat_value(txns, cat, catf, ignore=None) -> float:
-    """Value of a category, expanding the EBITDA composite (Revenue - Opex)."""
+def _cat_value(txns, cat, catf, ignore=None, addback: float = 0.0) -> float:
+    """Value of a category, expanding the EBITDA composite (Revenue - Opex).
+
+    `addback` carries non-recurring items the contract adds back to EBITDA, subject to a
+    materiality floor (ACC-7804: items >= $300k only). Those are disclosed in an image,
+    not in the text layer — see pipeline/pdfimages.py."""
     if cat == EBITDA:
-        return _sum(txns, REVENUE, catf, ignore) - _sum(txns, OPEX, catf, ignore)
+        return _sum(txns, REVENUE, catf, ignore) - _sum(txns, OPEX, catf, ignore) + addback
     return _sum(txns, cat, catf, ignore)
 
 
-def _terms_sum(txns, terms, catf, ignore=None) -> float:
+def _terms_sum(txns, terms, catf, ignore=None, addback: float = 0.0) -> float:
     """Signed sum over [(sign, category), ...] where sign is +1/-1."""
-    return sum(sign * _cat_value(txns, cat, catf, ignore) for sign, cat in terms)
+    return sum(sign * _cat_value(txns, cat, catf, ignore, addback) for sign, cat in terms)
 
 
 # Formula table for the ratio (leverage/cover) covenants, keyed by definition keywords.
@@ -246,8 +262,10 @@ def compute_actual(kind: str, txns: list[Txn], catf: Categorizer,
         f = extras.get("formula")
         if not f:
             return None
-        den = _terms_sum(txns, f["den"], catf, ignore)
-        return _terms_sum(txns, f["num"], catf, ignore) / den if den else None
+        ab = extras.get("ebitda_addback", 0.0)
+        den = _terms_sum(txns, f["den"], catf, ignore, ab)
+        num = _terms_sum(txns, f["num"], catf, ignore, ab)
+        return num / den if den else None
     if kind == "MIN_REVENUE":
         return _sum(txns, REVENUE, catf, ignore)
     if kind == "RELATED_PARTY_ABS":

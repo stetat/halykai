@@ -8,6 +8,7 @@ Audit reports carry a "Дополнение о соблюдении ковена
 Only APPLIED reclassifications change `actual`; the REJECTED ones are traps (and the
 'ПРОМЕЖУТОЧНАЯ/предварительн' interim worksheets are drafts — lower trust than the final report)."""
 from __future__ import annotations
+import json
 import re
 from . import config, docmap, pdftext
 from .engine import Reclass, OTHER, label_to_category as engine_label_to_category
@@ -109,6 +110,46 @@ def _clean_name(s: str) -> str:
     return s.strip(" .,")
 
 
+def image_facts() -> dict:
+    """Determinations that live only inside embedded images (see pipeline/pdfimages.py)."""
+    p = config.ROOT / "image_facts.json"
+    if not p.exists():
+        return {}
+    return {k: v for k, v in json.loads(p.read_text(encoding="utf-8")).items()
+            if not k.startswith("_")}
+
+
+def _related_from_image(acc: str) -> set[str]:
+    e = image_facts().get(acc) or {}
+    thr = e.get("ownership_threshold_pct")
+    if thr is None:
+        return set()
+    return {n for n, pct in (e.get("holdings_pct") or {}).items() if pct >= thr}
+
+
+def unrestricted_subsidiaries(acc: str) -> set[str]:
+    """Subsidiaries outside the security perimeter (pledged share below the threshold).
+
+    Needed by the unrestricted-assets covenant, which is an identity test no description
+    classifier can perform. Disclosed only in an image for ACC-7809."""
+    e = image_facts().get(acc) or {}
+    thr = e.get("pledged_threshold_pct")
+    if thr is None:
+        return set()
+    return {n for n, pct in (e.get("subsidiary_pledged_pct") or {}).items() if pct < thr}
+
+
+def ebitda_addback(acc: str) -> float:
+    """One-off items added back to EBITDA, applying the contract's materiality floor.
+
+    Items BELOW the floor are explicitly not added back — they are decoys."""
+    e = image_facts().get(acc) or {}
+    floor = e.get("ebitda_addback_floor_usd")
+    if floor is None:
+        return 0.0
+    return sum(v for v in (e.get("one_off_items_usd") or {}).values() if v >= floor)
+
+
 def related_parties(acc: str, dm: dict | None = None) -> set[str]:
     """Counterparties that qualify as related parties for this borrower.
 
@@ -139,7 +180,10 @@ def related_parties(acc: str, dm: dict | None = None) -> set[str]:
                 if k.lower() == nm.lower() or nm.lower() in k.lower():
                     holdings[k] = _pct(m.group(2))
         parties |= {n for n, p in holdings.items() if p >= threshold}
-    return parties
+    # ACC-7802's ownership section and ACC-7806's whole dossier are IMAGES; the text layer
+    # yields nothing, so without this both report zero related-party spend and a confident
+    # COMPLIANT on cells the key marks BREACH.
+    return parties or _related_from_image(acc)
 
 
 if __name__ == "__main__":

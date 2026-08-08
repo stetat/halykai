@@ -4,9 +4,11 @@ Filenames/extensions in this dataset are deliberate misdirection, so we type fil
 by magic bytes, not extension, and extract with `pdftotext -raw -enc UTF-8`
 (the -layout mode destroys the Cyrillic; -raw recovers it)."""
 from __future__ import annotations
+import hashlib
 import subprocess
 from pathlib import Path
 from . import config
+from .ledger import _decode
 
 
 def magic(path: Path, n: int = 8) -> bytes:
@@ -38,24 +40,41 @@ def true_type(path: Path) -> str:
 
 
 def extract_text(path: Path, use_cache: bool = True) -> str:
-    """Extract text from a (possibly mis-extensioned) PDF. Cached by filename."""
-    cache_file = config.TXT_CACHE / (path.name + ".txt")
+    """Extract text from a (possibly mis-extensioned) PDF, cached by CONTENT.
+
+    The cache key includes a hash of the file's bytes, not just its name. Event day ships
+    a new archive that may reuse these hashed filenames; a name-only key would return the
+    practice release's text for a different document, silently, and every downstream number
+    would describe the wrong borrower."""
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()[:16]
+    cache_file = config.TXT_CACHE / f"{path.name}.{digest}.txt"
     if use_cache and cache_file.exists():
         return cache_file.read_text(encoding="utf-8", errors="replace")
-    if not is_pdf(path):
-        # Not a PDF: return raw text as-is (handles the disguised CSV/MD/RU files).
+
+    if raw[:4] != b"%PDF":
+        # Not a PDF: decode as text (handles the disguised CSV/MD/RU files, incl. cp1251).
+        text = _decode(raw)
+    else:
         try:
-            return path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            return ""
-    try:
-        out = subprocess.run(
-            ["pdftotext", "-raw", "-enc", "UTF-8", str(path), "-"],
-            capture_output=True, timeout=120,
-        )
+            out = subprocess.run(
+                ["pdftotext", "-raw", "-enc", "UTF-8", str(path), "-"],
+                capture_output=True, timeout=120,
+            )
+        except FileNotFoundError:
+            raise RuntimeError("pdftotext not found. Install poppler (it provides pdftotext).")
         text = out.stdout.decode("utf-8", errors="replace")
-    except FileNotFoundError:
-        raise RuntimeError("pdftotext not found. Install poppler (it provides pdftotext).")
+        # Never cache a FAILED extraction: a cached empty string is indistinguishable from
+        # an empty document forever after, quietly dropping the file from every analysis.
+        # An exit-0 empty result is different — the PDF genuinely carries no text layer
+        # (image-only) — so it is cached, but said out loud in case it needs OCR.
+        if out.returncode != 0:
+            err = out.stderr.decode("utf-8", "replace").strip()[:200]
+            raise RuntimeError(f"pdftotext failed on {path.name} "
+                               f"(exit {out.returncode}){': ' + err if err else ''}")
+        if not text.strip():
+            print(f"!! {path.name}: PDF has no extractable text layer (image-only?); "
+                  f"it will contribute nothing to document analysis.")
     if use_cache:
         cache_file.write_text(text, encoding="utf-8")
     return text

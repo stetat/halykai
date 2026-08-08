@@ -11,13 +11,18 @@ import json
 import pathlib
 import re
 
-from . import config, covenants, docmap, pdftext, reclass
+from . import config, covenants, docmap, pdfimages, pdftext, reclass
 
 FAILURES: list[str] = []
 _DM = docmap.build(save=False)
 _KEY = json.loads(config.ANSWER_KEY.read_text(encoding="utf-8"))["scenarios"]
+# Source documents only. The answer key and the ground-truth decoy must NOT be in here:
+# they contain every evidence id, so including them would make "is this id documented?"
+# trivially true and silently turn the evidence check into a no-op.
+_EXCLUDE = ("submission_template.json", "ground_truth.json")
 _ALL_TEXT = "\n".join(p.read_text(encoding="utf-8", errors="replace")
-                      for p in (config.TXT_CACHE).glob("*.txt"))
+                      for p in config.TXT_CACHE.glob("*.txt")
+                      if not p.name.startswith(_EXCLUDE))
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -82,10 +87,34 @@ check("indirect 27.3% holding is not treated as a related party "
 
 resolved = sum(1 for acc in config.SCENARIO_TO_ACC.values()
                if reclass.related_parties(acc, _DM))
-print(f"\nRelated-party lists resolved for {resolved}/12 borrowers "
-      f"(P2 and P6 ship no ownership dossier in this release).")
-check("related parties resolved for every borrower whose dossier exists", resolved >= 10,
-      f"got {resolved}")
+check("related parties resolve for ALL 12 borrowers", resolved == 12, f"got {resolved}")
+
+# --- determinations that exist only inside embedded images ------------------------------
+# pdftotext sees nothing in these, so a text-only pipeline reports a confident wrong answer.
+check("ACC-7802 related party comes from the image ownership table (>=25.0%)",
+      {n.lower() for n in reclass.related_parties("ACC-7802", _DM)}
+      == {"zhetysu capital partners llp"},
+      f"got {sorted(reclass.related_parties('ACC-7802', _DM))}")
+check("ACC-7802 excludes Tien Shan Advisory Bureau (23.4% < 25.0%)",
+      not any("tien shan" in n.lower() for n in reclass.related_parties("ACC-7802", _DM)))
+check("ACC-7806 related party comes from the scanned dossier (>=40.0%)",
+      {n.lower() for n in reclass.related_parties("ACC-7806", _DM)}
+      == {"taraz holding group llp"},
+      f"got {sorted(reclass.related_parties('ACC-7806', _DM))}")
+check("ACC-7806 excludes Taraz Kiln Services LLP (38.1% < 40.0%)",
+      not any("kiln" in n.lower() for n in reclass.related_parties("ACC-7806", _DM)))
+check("ACC-7809 unrestricted subsidiary = the one under 50% pledged",
+      {n.lower() for n in reclass.unrestricted_subsidiaries("ACC-7809")}
+      == {"zhezkazgan processing holdings llp"},
+      f"got {sorted(reclass.unrestricted_subsidiaries('ACC-7809'))}")
+check("ACC-7804 EBITDA add-back applies the $300k floor (excludes the $251k item)",
+      abs(reclass.ebitda_addback("ACC-7804") - (342905.28 + 481247.63)) < 0.005,
+      f"got {reclass.ebitda_addback('ACC-7804')}")
+
+# The images must remain discoverable — this is how the facts above were found at all.
+_img_docs = {n for n, _ in pdfimages.find_image_docs()}
+for need in ("f5e315b390df.pdf", "6686c0493014.pdf", "2fe3878667db.pdf", "abe2474bd443.pdf"):
+    check(f"{need} is flagged as carrying an embedded image", need in _img_docs)
 
 # --- document routing & clause slicing --------------------------------------------------
 check("every borrower has a live 2025 contract selected",

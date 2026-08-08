@@ -1,0 +1,48 @@
+{
+  "_README": [
+    "Determinations that exist ONLY inside embedded images, transcribed by reading the",
+    "PNGs that `python -m pipeline.pdfimages` writes to cache/images/.",
+    "pdftotext sees nothing in these documents, so without this file the pipeline reports",
+    "a confident wrong answer (e.g. zero related-party spend for ACC-7802 and ACC-7806).",
+    "Every entry records its source document so it can be re-checked against the image.",
+    "On event day: re-run `python -m pipeline.pdfimages`, LOOK at the PNGs, and update this.",
+    "Values here are used only where the text layer yields nothing for that account."
+  ],
+  "ACC-7802": {
+    "source": "6686c0493014.pdf (ownership section is an image inside a text dossier)",
+    "ownership_threshold_pct": 25.0,
+    "holdings_pct": {
+      "Almaty Chill Logistics LLP": 8.6,
+      "Tien Shan Advisory Bureau": 23.4,
+      "Zhetysu Capital Partners LLP": 31.2
+    }
+  },
+  "ACC-7806": {
+    "source": "f5e315b390df.pdf (entire KYC dossier is scanned; no text layer at all)",
+    "ownership_threshold_pct": 40.0,
+    "holdings_pct": {
+      "Taraz Holding Group LLP": 46.8,
+      "Taraz Kiln Services LLP": 38.1,
+      "Ural Grinding Works LLP": 11.5
+    }
+  },
+  "ACC-7804": {
+    "source": "2fe3878667db.pdf (one-off items added back to EBITDA)",
+    "note": "Разовыми признаются статьи в сумме НЕ МЕНЕЕ $300,000.00; меньшие к EBITDA не прибавляются.",
+    "ebitda_addback_floor_usd": 300000.0,
+    "one_off_items_usd": {
+      "Zhaiyk Dredging LLP": 251338.94,
+      "Aral Freight Arbitration Bureau": 342905.28,
+      "Ilek Restoration Works LLP": 481247.63
+    }
+  },
+  "ACC-7809": {
+    "source": "abe2474bd443.pdf (security coverage of subsidiaries)",
+    "note": "Дочерние организации с долей активов в залоге НИЖЕ 50.0% считаются НЕОГРАНИЧЕННЫМИ.",
+    "pledged_threshold_pct": 50.0,
+    "subsidiary_pledged_pct": {
+      "Zhezkazgan Conveyor Assets LLP": 87.6,
+      "Zhezkazgan Processing Holdings LLP": 11.4
+    }
+  }
+}

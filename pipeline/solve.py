@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 from . import config, docmap, covenants, reclass, engine, scorer, classifier, ledger as ledgermod
-from .engine import Categorizer
+from .engine import Categorizer, RELATED_PARTY
 
 TEAM = "your-team-name"
 CONTACT = "adarhan76@gmail.com"
@@ -95,23 +95,28 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
         txns = txns_by_sc[sc]
         rcs = reclass.for_account(acc, dm)
         rps = reclass.related_parties(acc, dm)
+        # Identity/adjustment facts that live only inside embedded images (image_facts.json)
+        unrestricted = reclass.unrestricted_subsidiaries(acc)
+        addback = reclass.ebitda_addback(acc)
         if classifier_mode == "gemini":
             # one Gemini call for this borrower; LLM handles related-party via the KYC list,
             # so we don't also apply the noisy counterparty override here.
             try:
                 cat_map = classifier.classify_batch(txns, related_parties=rps)
                 base = classifier.make_base_classifier(cat_map)
-                catf = Categorizer(base, rcs, related_parties=set())
+                catf = Categorizer(base, rcs, related_parties=set(),
+                                   unrestricted_parties=unrestricted)
             except Exception as e:                       # quota/network -> keywords
                 print(f"!! {sc}: Gemini classifier failed ({e}); using keywords")
-                catf = Categorizer(base_classifier, rcs, related_parties=rps)
+                catf = Categorizer(base_classifier, rcs, related_parties=rps,
+                                   unrestricted_parties=unrestricted)
         else:
-            catf = Categorizer(base_classifier, rcs, related_parties=rps)
+            catf = Categorizer(base_classifier, rcs, related_parties=rps,
+                               unrestricted_parties=unrestricted)
         if not rps:
-            # No KYC ownership list for this borrower (ACC-7802's dossier omits the section,
-            # ACC-7806 files none). Identity is unavailable, so fall back to description
-            # hints — a worse signal than the contracts mandate, but strictly better than
-            # reporting a confident 0 on a related-party covenant.
+            # All 12 borrowers resolve today (two of them only via image_facts.json, since
+            # their ownership tables are images). This stays as a safety net for event day:
+            # identity is authoritative, but a description guess beats a confident 0.
             inner = catf.base
             catf.base = lambda t: (RELATED_PARTY if classifier.looks_related_party(t)
                                    else inner(t))
@@ -127,7 +132,8 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
                       f"archive for a dossier — identity, not description, is authoritative.")
             # One bad cell must never cost us the other 35.
             try:
-                res = engine.evaluate(spec, txns, catf, rcs)
+                res = engine.evaluate(spec, txns, catf, rcs,
+                                      extras={"ebitda_addback": addback})
             except Exception as e:
                 print(f"!! {sc} {cid}: engine error ({e}); left empty")
                 continue

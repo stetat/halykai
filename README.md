@@ -41,6 +41,7 @@ pipeline/
   test_engine.py  synthetic-ledger correctness tests for the engine
   test_ledger.py  dialect torture-test: the same ledger in 8 plausible formats
   test_roundtrip.py  the 36/36 forced through a hostile file (cp1251/';'/Cyrillic/KZT+FX)
+  pdfimages.py    stdlib PDF image extraction — the dataset hides tables in images
   test_docs.py    document reading vs REAL ground truth (evidence ids, KYC thresholds)
   cli.py          entry point
 ```
@@ -60,23 +61,32 @@ disclosed further down as 27.3% — below that dossier's 30.0% bar, so it does *
 Previously `related_parties()` returned every company name in the file, which inflates all
 12 related-party cells. 10/12 borrowers resolve.
 
-**P2 and P6 are missing their ownership data, in two different ways** (searched exhaustively
-by `KYC-ACC-nnnn` registration number across all 200 files):
+All 12 borrowers resolve — but **two of them only via images** (see below).
 
-| account | dossier | ownership section |
+## The deepest trap: covenant data hidden inside IMAGES
+`pdftotext` returns nothing for an image, so a text-only pipeline reads these documents as
+ordinary and **silently drops the determination**. Four documents do this, and each one
+changes an answer:
+
+| document | account | what only the image says |
 |---|---|---|
-| ACC-7802 (P2) | exists — `6686c0493014.pdf`, `KYC-ACC-7802-2025` | **omitted** |
-| ACC-7806 (P6) | **none filed** | — |
+| `f5e315b390df.pdf` | ACC-7806 (P6) | the **entire KYC dossier**, scanned — no text layer at all |
+| `6686c0493014.pdf` | ACC-7802 (P2) | the ownership section of an otherwise-text dossier |
+| `2fe3878667db.pdf` | ACC-7804 (P4) | one-off items **added back to EBITDA**, with a $300k floor |
+| `abe2474bd443.pdf` | ACC-7809 (P9) | which subsidiaries are **unrestricted** (<50% pledged) |
 
-P2's dossier is otherwise complete and even states *"В состав досье включены … сведения о
-структуре владения"* — then never shows them. The audit note confirms related-party
-transactions exist but names nobody. This looks deliberate, like the withheld ledger.
+`python -m pipeline.pdfimages` finds every PDF carrying a sizeable image and writes them to
+`cache/images/` as PNGs — stdlib only, no poppler or Pillow (the streams are FlateDecode
+with a PNG predictor, so the inflated bytes are already PNG's IDAT payload). The values
+read off those PNGs live in **`image_facts.json`**, each with its source document so it can
+be re-checked. They are used only where the text layer yields nothing for that account.
 
-For those two, `solve` warns and falls back to **description hints**
-(`classifier.looks_related_party`: материнск / аффилирован / внутригруппов / общего центра
-услуг / управленческое вознаграждение …). The contracts say identity governs, *"а не
-назначением платежа"*, so this is knowingly the weaker signal — used only because the
-alternative is a confident `0` and a false COMPLIANT. **Re-check the archive on event day.**
+Each image carries the same **threshold + near-miss decoy** structure as the text dossiers:
+P2's bar is 25.0% with a 23.4% decoy; P6's is 40.0% with a 38.1% decoy; P4's add-back floor
+is $300k with a $251k item that must **not** be added; P9's pledge bar is 50.0%.
+
+**Event day:** re-run `python -m pipeline.pdfimages`, *look at* the PNGs, update
+`image_facts.json`. There is no OCR in this environment, so this step is deliberately human.
 
 ## Event-day ingestion hardening
 The case states the ledger is **one file for all borrowers, multi-currency, expenses
@@ -148,6 +158,7 @@ keywords don't cover, so recalibrate both against the actual ledger on event day
   counterparty names — rather than invented by us; the other 22 are hand-written, so treat
   this as a calibration signal, not a guarantee.
 - Engine metric-definition tests: **9/9**, each written against real mined clause wording.
+- Related-party lists resolve for **12/12** borrowers (2 only via `image_facts.json`).
 - Document ground-truth tests (`python -m pipeline.test_docs`): **all pass**. Evidence
   transactions the documents actually name are recovered **2/2** as applied
   reclassifications (was 0/2 — the parser's sentence terminator broke on the `.` inside
