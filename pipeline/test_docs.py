@@ -64,8 +64,9 @@ check("the spec's example txn TXN-P1-0039 is not a P1 reclassification",
 # A reclassification quoting another borrower (or the spec's example scenario T1) must not
 # leak into this borrower's set.
 for sc, acc in config.SCENARIO_TO_ACC.items():
+    # reclassifications identified by amount+counterparty carry no txn id to check
     foreign = [r.txn_id for r in reclass.for_account(acc, _DM)
-               if r.txn_id.split("-")[1].upper() != sc.upper()]
+               if r.txn_id and r.txn_id.split("-")[1].upper() != sc.upper()]
     check(f"{sc}: no foreign-scenario reclassifications", not foreign, f"got {foreign}")
 
 # Amounts contain periods ("($418,204.37)"), which must not end the clause early —

@@ -125,6 +125,8 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
         rps = reclass.related_parties(acc, dm)
         # Identity/adjustment facts that live only inside embedded images (image_facts.json)
         unrestricted = reclass.unrestricted_subsidiaries(acc)
+        # Cut-off notes: rows whose services fall outside the covenant year leave the period.
+        excluded = reclass.period_exclusions(acc, dm)
         addback = reclass.ebitda_addback(acc)
         if classifier_mode in ("gemini", "hybrid"):
             # one Gemini call for this borrower; LLM handles related-party via the KYC list,
@@ -142,14 +144,17 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
                           + (f" ({len(st['errors'])} call(s) failed)" if st["errors"] else ""))
                 base = classifier.make_base_classifier(cat_map)
                 catf = Categorizer(base, rcs, related_parties=set(),
-                                   unrestricted_parties=unrestricted)
+                                   unrestricted_parties=unrestricted,
+                                   excluded_txns=excluded)
             except Exception as e:                       # quota/network -> keywords
                 print(f"!! {sc}: Gemini classifier failed ({e}); using keywords")
                 catf = Categorizer(base_classifier, rcs, related_parties=rps,
-                                   unrestricted_parties=unrestricted)
+                                   unrestricted_parties=unrestricted,
+                                   excluded_txns=excluded)
         else:
             catf = Categorizer(base_classifier, rcs, related_parties=rps,
-                               unrestricted_parties=unrestricted)
+                               unrestricted_parties=unrestricted,
+                               excluded_txns=excluded)
         if not rps:
             # All 12 borrowers resolve today (two of them only via image_facts.json, since
             # their ownership tables are images). This stays as a safety net for event day:

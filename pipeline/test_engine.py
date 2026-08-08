@@ -271,6 +271,47 @@ def test_reclassified_category_labels_resolve():
     print("ok  every reclassification target label maps to a real category")
 
 
+def test_amount_counterparty_reclassification_resolves():
+    """Final audit reports name a payment by amount + counterparty, never by TXN id:
+    "Сумма в размере $592,296.10, выплаченная контрагенту Irtysh Advisory Bureau …
+    переклассифицирована … как Процентные расходы." The parser used to start at "TXN-", so
+    these applied reclassifications were dropped entirely — here from the denominator of an
+    interest-cover ratio."""
+    hit = _t("TXN-X-0001", -592_296.10, cp="Irtysh Advisory Bureau", desc="консультационные")
+    same_party = _t("TXN-X-0002", -10_000, cp="Irtysh Advisory Bureau", desc="консультационные")
+    other = _t("TXN-X-0003", -592_296.10, cp="Someone Else LLP", desc="консультационные")
+    rc = Reclass(txn_id="", to_category=engine.INTEREST, from_category=OPEX,
+                 applied=True, amount=592_296.10, counterparty="Irtysh Advisory Bureau")
+    catf = Categorizer(_base_classifier({"консультационные": OPEX}), reclasses=[rc])
+
+    ok = (catf.category(hit) == engine.INTEREST
+          and catf.category(same_party) == OPEX      # right party, wrong amount
+          and catf.category(other) == OPEX)          # right amount, wrong party
+    print(f"{'ok ' if ok else 'FAIL'} reclassification cited by amount+counterparty resolves, "
+          f"and only for the row it names")
+    assert ok
+
+
+def test_out_of_period_transaction_leaves_every_metric():
+    """A cut-off note ("услуги, оказанные в период с 2026-01-15 по 2026-03-20") puts the row
+    outside the covenant year. It is not a reclassification — no category is right for it — so
+    it must drop out of numerator AND denominator, not merely move between them."""
+    txns = [
+        _t("TXN-X-0001", -100_000, desc="capex machinery"),
+        _t("TXN-X-0002", -400_000, desc="opex operating"),
+        _t("TXN-X-0009", -900_000, desc="capex machinery"),   # 2026 services
+    ]
+    clf = _base_classifier({"capex": CAPEX, "opex": OPEX})
+    catf = Categorizer(clf, reclasses=[], excluded_txns={"TXN-X-0009"})
+
+    capex = engine._sum(txns, CAPEX, catf)
+    opex = engine._sum(txns, OPEX, catf)
+    ok = abs(capex - 100_000) < 0.01 and abs(opex - 400_000) < 0.01
+    print(f"{'ok ' if ok else 'FAIL'} out-of-period transaction leaves every metric "
+          f"(capex={capex:,.0f} opex={opex:,.0f})")
+    assert ok
+
+
 def main():
     test_capex_intensity_ratio_and_no_evidence()
     test_refunds_net_against_their_category()
@@ -284,6 +325,8 @@ def main():
     test_related_party_ratio_base_is_opex_when_clause_says_so()
     test_associated_expenses_is_not_a_related_party_covenant()
     test_generic_uses_the_quoted_category()
+    test_amount_counterparty_reclassification_resolves()
+    test_out_of_period_transaction_leaves_every_metric()
     print("\nALL ENGINE TESTS PASSED")
 
 

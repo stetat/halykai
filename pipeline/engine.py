@@ -32,16 +32,26 @@ TAX = "tax"                      # налоги
 UTILITIES = "utilities"          # коммунальные расходы
 GROUP_CAPEX = "group_capex"      # капитальные затраты Группы (консолидированные)
 UNRESTRICTED_ASSETS = "unrestricted_assets"  # активы, переданные Неограниченным дочерним
+# Not a category so much as the absence of one: a transaction whose services fall outside the
+# covenant period. No formula asks for it, so the amount leaves every metric at once — which is
+# the point. Distinct from OTHER, which some covenants legitimately read.
+EXCLUDED = "excluded_out_of_period"
 EBITDA = "__ebitda__"            # composite sentinel: sum(REVENUE) - sum(OPEX)
 
 
 @dataclass
 class Reclass:
-    """An auditor reclassification. `applied=False` = considered but rejected (a trap)."""
+    """An auditor reclassification. `applied=False` = considered but rejected (a trap).
+
+    `txn_id` is empty when the audit report identified the payment by amount and counterparty
+    instead — the final reports routinely do — in which case Categorizer resolves it against
+    the ledger."""
     txn_id: str
     to_category: str
     from_category: str | None = None
     applied: bool = True
+    amount: float | None = None
+    counterparty: str | None = None
 
 
 Classifier = Callable[[Txn], str]   # base categoriser over a raw txn
@@ -56,14 +66,24 @@ def _norm_party(s: str) -> str:
 class Categorizer:
     def __init__(self, base: Classifier, reclasses: list[Reclass],
                  related_parties: set[str] | None = None,
-                 unrestricted_parties: set[str] | None = None):
+                 unrestricted_parties: set[str] | None = None,
+                 excluded_txns: set[str] | None = None):
         self.base = base
+        # Cut-off: services rendered outside the covenant year are not in the period at all,
+        # so the row belongs to no metric. EXCLUDED is a category no formula asks for, which
+        # drops the amount from every numerator and denominator at once.
+        self.excluded = set(excluded_txns or ())
         self.related = {p for p in (_norm_party(r) for r in (related_parties or set())) if p}
         # Subsidiaries outside the security perimeter. Like related parties this is an
         # IDENTITY test — no description classifier can tell which subsidiary is
         # unrestricted, it is decided by the pledged-asset share in the KYC dossier.
         self.unrestricted = {p for p in (_norm_party(r) for r in (unrestricted_parties or set())) if p}
-        self._applied = {r.txn_id: r.to_category for r in reclasses if r.applied}
+        self._applied = {r.txn_id: r.to_category
+                         for r in reclasses if r.applied and r.txn_id}
+        # Reclassifications the audit report identified by amount + counterparty rather than
+        # by TXN id. Only the ledger can say which row that is, so they resolve here.
+        self._unresolved = [r for r in reclasses
+                            if r.applied and not r.txn_id and r.amount is not None]
 
     @staticmethod
     def _matches(cp: str, names: set[str]) -> bool:
@@ -76,9 +96,24 @@ class Categorizer:
     def _is_related(self, counterparty: str) -> bool:
         return self._matches(_norm_party(counterparty), self.related)
 
+    def _resolve(self, t: Txn) -> Reclass | None:
+        """An amount+counterparty reclassification naming this row, if any."""
+        amt = abs(t.amount_usd if t.amount_usd is not None else t.amount)
+        cp = _norm_party(t.counterparty)
+        for r in self._unresolved:
+            if abs(amt - r.amount) <= 0.01 and self._matches(cp, {_norm_party(r.counterparty)}):
+                return r
+        return None
+
     def category(self, t: Txn, ignore_reclass: str | None = None) -> str:
+        if t.txn_id in self.excluded:
+            return EXCLUDED
         if t.txn_id in self._applied and t.txn_id != ignore_reclass:
             return self._applied[t.txn_id]
+        if self._unresolved and t.txn_id != ignore_reclass:
+            r = self._resolve(t)
+            if r is not None:
+                return r.to_category
         # base classification; identity overrides on the counterparty axis. The contracts
         # are explicit that these are identity tests, not description tests. Related-party
         # wins: "учитывается в полном объёме независимо от категории расходов".

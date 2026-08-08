@@ -42,6 +42,27 @@ _FROM_RE = re.compile(r"первоначальн\w*\s+(?:учтённ\w+|учт�
 _TO_RE = re.compile(r"(?:пере|ре)классифицирован\w*.*?\bкак\s+([^,(]+)", re.I | re.S)
 _AMT_RE = re.compile(r"\$\s*([0-9][0-9\s.,]*)")
 
+# A final report often does NOT cite a TXN id. It names the payment by amount and counterparty:
+#   "(7.1) Сумма в размере $142,118.64, выплаченная контрагенту Tengiz Risk Engineering Bureau,
+#    первоначально учтённая как Операционные расходы, переклассифицирована ... как Страховые
+#    премии."
+# RECLASS_RE starts at "TXN-", so every one of these was invisible — and they are APPLIED
+# reclassifications in the authoritative document. They are resolved against the ledger at
+# solve time (see engine.Categorizer), because only the ledger knows which row this is.
+_AMT_CP_RE = re.compile(
+    r"Сумма\s+в\s+размере\s*\$\s*([0-9][0-9\s.,]*)\s*,\s*"
+    r"выплаченн\w*\s+контрагенту\s+([^,]{3,70}?)\s*,"
+    r"((?:[^.]|\.(?=\d))*)\.(?!\d)", re.S | re.I)
+
+# Covenant testing is period-bound: "Выручка признаётся в том ковенантном периоде, в котором
+# фактически оказаны услуги, независимо от даты счёта-фактуры." A 2025-dated invoice for work
+# performed in 2026 belongs to neither the numerator nor the denominator of a 2025 covenant, so
+# the transaction must leave the period entirely — this is an EXCLUSION, not a reclassification.
+_CUTOFF_RE = re.compile(
+    r"(TXN-[A-Za-z0-9-]+)((?:[^.]|\.(?=\d))*?)"
+    r"оказанн\w*\s+в\s+период\s+с\s+(\d{4})-\d{2}-\d{2}\s+по\s+(\d{4})-", re.S | re.I)
+COVENANT_YEAR = "2025"
+
 
 def _to_cat(text: str | None) -> str:
     return engine_label_to_category(text)
@@ -75,7 +96,46 @@ def _parse_reclasses(text: str, want: str) -> list[Reclass]:
                              to_category=_to_cat(to.group(1) if to else None),
                              from_category=_to_cat(frm.group(1) if frm else None),
                              applied=bool(to) and not REJECT_RE.search(body)))
+    for m in _AMT_CP_RE.finditer(text):
+        amt, cp, body = m.group(1), m.group(2).strip(), m.group(3)
+        to = _TO_RE.search(body)
+        if not to:
+            continue
+        frm = _FROM_RE.search(body)
+        found.append(Reclass(txn_id="",                     # unknown until the ledger arrives
+                             to_category=_to_cat(to.group(1)),
+                             from_category=_to_cat(frm.group(1) if frm else None),
+                             applied=not REJECT_RE.search(body),
+                             amount=_amt(amt), counterparty=cp))
     return found
+
+
+def period_exclusions(acc: str, dm: dict | None = None) -> set[str]:
+    """Transactions whose services fall OUTSIDE the covenant year, so they leave the period.
+
+    "Примечание 7 — Отсечение и начисления. Выручка признаётся в том ковенантном периоде, в
+    котором фактически оказаны услуги, независимо от даты счёта-фактуры … (7.1) Операция
+    TXN-P1-0045 (счёт-фактура от 2025-08-12) относится к услугам, оказанным в период с
+    2026-01-15 по 2026-03-20."
+
+    This is not a reclassification — no category is correct for it, because the transaction is
+    not in the period at all. reclass.py parsed it as from=other -> to=other, i.e. a no-op, and
+    nothing anywhere implemented cut-offs, so the amount stayed in whichever metric its category
+    fed."""
+    dm = dm or docmap.build(save=False)
+    groups = dm["by_acc"].get(acc, {})
+    want = config.ACC_TO_SCENARIO.get(acc, "").upper()
+    out: set[str] = set()
+    for name in {n for names in groups.values() for n in names}:
+        text = pdftext.extract_text(config.DATASET / name)
+        for m in _CUTOFF_RE.finditer(text):
+            txn, _, y_from, y_to = m.groups()
+            parts = txn.split("-")
+            if want and len(parts) > 1 and parts[1].upper() != want:
+                continue
+            if COVENANT_YEAR not in (y_from, y_to):
+                out.add(txn)
+    return out
 
 
 def for_account(acc: str, dm: dict | None = None) -> list[Reclass]:
@@ -102,15 +162,17 @@ def for_account(acc: str, dm: dict | None = None) -> list[Reclass]:
     audit_docs = groups.get("audits", []) + groups.get("other", [])
     want = config.ACC_TO_SCENARIO.get(acc, "").upper()
 
-    final_rcs: dict[str, Reclass] = {}
-    interim_rcs: dict[str, Reclass] = {}
+    final_rcs: dict = {}
+    interim_rcs: dict = {}
     has_final = False
     for name in audit_docs:
         text = pdftext.extract_text(config.DATASET / name)
         interim = (not _SUPERSEDES_RE.search(text)) and bool(INTERIM_RE.search(text))
         target = interim_rcs if interim else final_rcs
         for rc in _parse_reclasses(text, want):
-            target[rc.txn_id] = rc
+            # amount+counterparty reclassifications have no txn id yet, so they cannot share
+            # a key — dedupe them on the pair the document actually gave us
+            target[rc.txn_id or (rc.amount, rc.counterparty)] = rc
         if not interim and _RECLASS_SECTION_RE.search(text):
             has_final = True
 
