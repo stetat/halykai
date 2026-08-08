@@ -50,6 +50,8 @@ pipeline/
   test_ledger.py  dialect torture-test: the same ledger in 8 plausible formats
   test_roundtrip.py  the 36/36 forced through a hostile file (cp1251/';'/Cyrillic/KZT+FX)
   pdfimages.py    stdlib PDF image extraction — the dataset hides tables in images
+  make_ledger.py  writes a realistic multi-borrower ledger CSV, then runs the real
+                  CLI against it — the only whole-program dress rehearsal
   test_docs.py    document reading vs REAL ground truth (evidence ids, KYC thresholds)
   cli.py          entry point
 ```
