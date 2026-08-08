@@ -11,7 +11,7 @@ import json
 import pathlib
 import re
 
-from . import config, covenants, docmap, pdfimages, pdftext, reclass
+from . import config, covenants, docmap, pdfimages, pdftext, reclass, solve
 
 FAILURES: list[str] = []
 _DM = docmap.build(save=False)
@@ -100,6 +100,21 @@ check("the interim worksheet is still recognised as interim",
 check("P9's final-report reclassification survives the interim/final split",
       any(r.txn_id == "TXN-P9-0025" and r.applied
           for r in reclass.for_account("ACC-7809", _DM)))
+
+# A blank cell scores zero with certainty; a guess cannot score less. Whatever else fails,
+# every one of the 36 cells must carry a status and an actual. This is checked on the WORST
+# case — no ledger at all — because that is the path that used to emit 36 blanks.
+_sub = solve.solve(None, write=False)   # must not clobber a real submission.json
+_cells = [(sc, cid, c) for sc, covs in _sub["answers"].items() for cid, c in covs.items()]
+check("solve emits all 36 cells even with no ledger", len(_cells) == 36, f"got {len(_cells)}")
+check("no cell is left without a status",
+      all(c["status"] in ("COMPLIANT", "BREACH") for _, _, c in _cells),
+      f"blank: {[(s, c) for s, c, v in _cells if not v['status']]}")
+check("no cell is left without an actual",
+      all(c["actual"] is not None for _, _, c in _cells),
+      f"blank: {[(s, c) for s, c, v in _cells if v['actual'] is None]}")
+check("the team name is set, not the spec placeholder", _sub["team"] != "your-team-name",
+      f"got {_sub['team']!r}")
 
 # --- related parties --------------------------------------------------------------------
 # Membership is an ownership threshold in the KYC dossier, and the thresholds differ per

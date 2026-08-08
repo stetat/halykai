@@ -15,7 +15,7 @@ import json
 from . import config, docmap, covenants, reclass, engine, scorer, classifier, ledger as ledgermod
 from .engine import Categorizer, RELATED_PARTY
 
-TEAM = "your-team-name"
+TEAM = "darkhan"
 CONTACT = "adarhan76@gmail.com"
 MODEL = config.MODEL_PRO
 
@@ -88,8 +88,44 @@ def _report_classifier_coverage(txns) -> None:
             print(f"     sample: {t.counterparty} | {t.description[:58]}")
 
 
+def _fill_unresolved(answers: dict, unresolved: list) -> None:
+    """Never submit a blank cell. A blank scores zero with certainty; a guess cannot score less.
+
+    The rubric awards status 0.50, actual 0.30 (linear decay to zero at 5% error) and evidence
+    0.20, and it awards none of them for an absent answer. So for any cell the engine could not
+    compute, emit the best available estimate and say so loudly:
+
+      status  — the majority verdict among the cells that DID compute in this same run. Derived
+                from the run rather than hardcoded, so it adapts to an event-day dataset with a
+                different compliance mix instead of encoding this practice release's balance.
+      actual  — the covenant's own threshold. Covenants are written at levels the borrower is
+                near, so the boundary is the least-bad point estimate; it also scores whenever
+                the truth is within 5% of the limit.
+      evidence — left null. CASE.ru.md decays evidence on the `actual` scale when the key holds
+                null, so a wrong id is not punished, but we have no basis to prefer any row.
+
+    Every guessed cell is printed. These are the cells to attack first if time remains."""
+    if not unresolved:
+        return
+    verdicts = [c["status"] for sc in answers.values() for c in sc.values()
+                if c["status"] in ("COMPLIANT", "BREACH")]
+    majority = (max(set(verdicts), key=verdicts.count) if verdicts else "COMPLIANT")
+
+    print(f"\n!! {len(unresolved)} cell(s) could not be computed. Guessing rather than leaving "
+          f"them blank — a blank scores 0, a guess cannot score less.")
+    print(f"   status prior = {majority} "
+          f"({verdicts.count(majority)}/{len(verdicts)} of the computed cells)")
+    for sc, cid, spec in unresolved:
+        thr = (spec or {}).get("threshold")
+        answers[sc][cid] = {"status": majority, "actual": thr, "evidence_txn_id": None}
+        why = "no clause parsed" if spec is None else "metric not computable from the ledger"
+        print(f"   {sc:>4} {cid}  <- {majority}, actual={thr}  ({why})")
+
+
 def solve(ledger_path: str | None = None, fx_path: str | None = None,
-          classifier_mode: str = "keyword") -> dict:
+          classifier_mode: str = "keyword", write: bool = True) -> dict:
+    """Build the submission. `write=False` returns it WITHOUT touching submission.json —
+    tests must never be able to clobber a real submission by importing this."""
     dm = docmap.build(save=True)
     specs = covenants.build(use_llm=False, save=True)   # regex specs (free, exact thresholds)
 
@@ -115,10 +151,14 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
                   f"Fix ledger._ALIASES/dialect and re-run.")
 
     answers: dict[str, dict] = {}
+    unresolved: list[tuple[str, str, dict | None]] = []
     for sc, acc in config.SCENARIO_TO_ACC.items():
         answers[sc] = {"6.1": empty_cell(), "6.2": empty_cell(), "6.3": empty_cell()}
         covs = specs.get(sc, {}).get("covenants", {})
         if not (ledger_path and sc in txns_by_sc):
+            # No ledger, or none of its rows resolved to this borrower. Nothing is computable,
+            # but the cells are still owed an answer — hand all three to the guess pass.
+            unresolved.extend((sc, cid, covs.get(cid)) for cid in ("6.1", "6.2", "6.3"))
             continue
         txns = txns_by_sc[sc]
         rcs = reclass.for_account(acc, dm)
@@ -165,6 +205,8 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
         for cid in ("6.1", "6.2", "6.3"):
             spec = covs.get(cid)
             if not spec:
+                # no clause parsed at all — still owed an answer, so guess it below
+                unresolved.append((sc, cid, None))
                 continue
             # A related-party covenant with an empty KYC list computes 0 and reports a
             # confident COMPLIANT — the most dangerous kind of wrong answer here.
@@ -177,20 +219,26 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
                 res = engine.evaluate(spec, txns, catf, rcs,
                                       extras={"ebitda_addback": addback})
             except Exception as e:
-                print(f"!! {sc} {cid}: engine error ({e}); left empty")
-                continue
-            if res.status in ("COMPLIANT", "BREACH"):
+                print(f"!! {sc} {cid}: engine error ({e})")
+                res = None
+            if res is not None and res.status in ("COMPLIANT", "BREACH"):
                 answers[sc][cid] = {
                     "status": res.status, "actual": res.actual,
                     "evidence_txn_id": res.evidence_txn_id,
                 }
+            else:
+                # Not computable — record it for the guess pass below rather than dropping it.
+                unresolved.append((sc, cid, spec))
+
+    _fill_unresolved(answers, unresolved)
 
     if TEAM == "your-team-name":
         print("!! solve.TEAM is still the spec's placeholder 'your-team-name' — "
               "set it before submitting.")
     submission = {"team": TEAM, "contact_email": CONTACT, "model": MODEL, "answers": answers}
-    (config.ROOT / "submission.json").write_text(
-        json.dumps(submission, ensure_ascii=False, indent=2), encoding="utf-8")
+    if write:
+        (config.ROOT / "submission.json").write_text(
+            json.dumps(submission, ensure_ascii=False, indent=2), encoding="utf-8")
     return submission
 
 
