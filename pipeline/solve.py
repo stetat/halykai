@@ -39,7 +39,8 @@ def _report_ledger(txns, txns_by_sc, rates, missing) -> None:
     one failure that silently scores 0, so it gets shouted about rather than logged."""
     print(f"Ledger: {len(txns)} rows, "
           f"{len(set(t.currency for t in txns))} currencies, "
-          f"{sum(1 for s in txns_by_sc if s)} scenarios resolved / 12")
+          f"{sum(1 for s in txns_by_sc if s)} scenarios resolved / "
+          f"{len(config.SCENARIO_TO_ACC)}")
     unmapped = len(txns_by_sc.get("", []))
     if unmapped:
         print(f"!! {unmapped}/{len(txns)} rows have NO scenario — neither the txn_id "
@@ -88,6 +89,46 @@ def _report_classifier_coverage(txns) -> None:
             print(f"     sample: {t.counterparty} | {t.description[:58]}")
 
 
+def _adopt_ledger_scenarios(txns) -> None:
+    """Let the ledger, not a hardcoded constant, decide which borrowers exist.
+
+    config.SCENARIO_TO_ACC lists the practice release's 12. If event day ships a thirteenth
+    borrower, renumbers the accounts, or uses different scenario ids, every unrecognised row
+    resolves to no scenario and those cells score zero — silently, because the pipeline has no
+    way to know it was supposed to see them. The ledger states the pairing in every row, so
+    adopt what it says and report any difference loudly rather than trusting the constant."""
+    found = ledgermod.discover_scenario_map(txns)
+    if not found:
+        print("!! could not read any scenario<->account pair from the ledger; keeping the "
+              "built-in map. Check ledger.TXN_RE against the real txn_id format.")
+        return
+    current = dict(config.SCENARIO_TO_ACC)
+    if found == current:
+        return
+    added = {k: v for k, v in found.items() if k not in current}
+    changed = {k: (current[k], v) for k, v in found.items()
+               if k in current and current[k] != v}
+    absent = {k: v for k, v in current.items() if k not in found}
+
+    print(f"Ledger defines {len(found)} borrowers; the built-in map had {len(current)}.")
+    for k, v in added.items():
+        print(f"!! ledger has borrower {k} -> {v}, absent from the built-in map — ADOPTED. "
+              f"Its cells would otherwise have scored 0.")
+    for k, (was, now) in changed.items():
+        print(f"!! {k} maps to {now} in the ledger, not {was} — ADOPTED (ledger is authoritative).")
+    for k, v in absent.items():
+        print(f"!! {k} ({v}) has no rows in the ledger; keeping it so its cells still get an "
+              f"answer.")
+    # Keep borrowers the ledger omits: they still have contracts, and a guessed cell beats a
+    # blank one. Ledger entries win on conflict.
+    merged = {**current, **found}
+    config.set_scenario_map(merged)
+    ledgermod.refresh_known_scenarios()
+    moved = ledgermod.reresolve(txns)
+    if moved:
+        print(f"   re-resolved {moved} row(s) against the adopted map.")
+
+
 def _fill_unresolved(answers: dict, unresolved: list) -> None:
     """Never submit a blank cell. A blank scores zero with certainty; a guess cannot score less.
 
@@ -126,6 +167,17 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
           classifier_mode: str = "keyword", write: bool = True) -> dict:
     """Build the submission. `write=False` returns it WITHOUT touching submission.json —
     tests must never be able to clobber a real submission by importing this."""
+    # The ledger is read BEFORE the documents, because it is the authority on which borrowers
+    # exist. docmap and the covenant specs are built per scenario, so discovering an extra or
+    # renamed borrower after building them would leave those cells with no spec.
+    pre_txns = None
+    if ledger_path:
+        try:
+            pre_txns = ledgermod.load(ledger_path)
+            _adopt_ledger_scenarios(pre_txns)
+        except Exception:
+            pre_txns = None          # reported properly by the real load below
+
     dm = docmap.build(save=True)
     specs = covenants.build(use_llm=False, save=True)   # regex specs (free, exact thresholds)
 

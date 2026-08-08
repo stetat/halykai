@@ -168,6 +168,43 @@ for raw, want in [
     check(f"_to_float({raw!r})", abs(L._to_float(raw) - want) < 0.005,
           f"got {L._to_float(raw)} want {want}")
 
+# --- an unseen borrower must be discovered, not silently dropped -------------------------
+# config.SCENARIO_TO_ACC lists this practice release's 12. If the real dataset carries a
+# thirteenth, or renumbers the accounts, `_scenario_of` recognises none of those rows: they
+# resolve to no scenario and the borrower never reaches the submission. Not a wrong answer —
+# a missing one, with nothing in the output hinting it should have been there. But every
+# ledger row states the pairing, so it is discoverable.
+from . import config                                                    # noqa: E402
+
+_saved = dict(config.SCENARIO_TO_ACC)
+try:
+    _rows = [L.Txn(f"TXN-Z9-{i:04d}", "ACC-9901", "2025-06-01", -1000.0, "USD",
+                   "ТОО Новый", "Операционные расходы", "") for i in range(1, 6)]
+    _rows += [L.Txn(f"TXN-P1-{i:04d}", "ACC-7801", "2025-06-01", -1000.0, "USD",
+                    "ТОО Старый", "Операционные расходы", "") for i in range(1, 4)]
+
+    _found = L.discover_scenario_map(_rows)
+    check("discover_scenario_map reads the pairs out of the ledger",
+          _found.get("Z9") == "ACC-9901" and _found.get("P1") == "ACC-7801", f"got {_found}")
+
+    _before = L._scenario_of("TXN-Z9-0001", "ACC-9901")
+    check("an unseen borrower is unresolvable against the built-in map", _before == "",
+          f"got {_before!r}")
+
+    config.set_scenario_map({**_saved, **_found})
+    L.refresh_known_scenarios()
+    check("it resolves once the ledger's map is adopted",
+          L._scenario_of("TXN-Z9-0001", "ACC-9901") == "Z9")
+    check("the update reaches modules that imported the dicts by name",
+          L.ACC_TO_SCENARIO.get("ACC-9901") == "Z9")
+    check("reresolve relabels rows already loaded under the old map",
+          L.reresolve(_rows) == 8, f"got {L.reresolve(_rows)}")
+finally:
+    config.set_scenario_map(_saved)
+    L.refresh_known_scenarios()
+check("the built-in map is restored after the test",
+      config.SCENARIO_TO_ACC == _saved and L._scenario_of("TXN-Z9-0001", "ACC-9901") == "")
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} LEDGER TEST(S) FAILED:")

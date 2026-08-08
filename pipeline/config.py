@@ -43,5 +43,23 @@ SCENARIO_TO_ACC = {
 }
 ACC_TO_SCENARIO = {v: k for k, v in SCENARIO_TO_ACC.items()}
 
+
+def set_scenario_map(mapping: dict[str, str]) -> None:
+    """Replace the scenario<->account map for this run.
+
+    Mutates both dicts IN PLACE rather than rebinding them. Several modules do
+    `from .config import SCENARIO_TO_ACC, ACC_TO_SCENARIO`, which binds the dict objects at
+    import time — rebinding here would leave those modules on the old map and produce a split
+    view where the ledger resolves a borrower the engine then skips.
+
+    The map above is the practice release's 12 borrowers. On event day the ledger is the
+    authority: `ledger.discover_scenario_map` reads the real pairs out of it and calls this,
+    so a dataset with different accounts, more borrowers or different scenario ids works
+    without a code change."""
+    SCENARIO_TO_ACC.clear()
+    SCENARIO_TO_ACC.update(mapping)
+    ACC_TO_SCENARIO.clear()
+    ACC_TO_SCENARIO.update({v: k for k, v in mapping.items()})
+
 # The pre-filled template doubles as the answer key for this practice release.
 ANSWER_KEY = DATASET / "submission_template.json"

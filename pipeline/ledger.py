@@ -16,6 +16,7 @@ import csv
 import io
 import re
 import unicodedata
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -180,6 +181,43 @@ def _to_float(s: str) -> float:
     except ValueError:
         return 0.0
     return -v if neg else v
+
+
+def discover_scenario_map(txns: list) -> dict[str, str]:
+    """Read the real scenario<->account pairs out of the ledger itself.
+
+    `_scenario_of` can only resolve scenarios already in the hardcoded map, so a dataset with
+    an extra borrower (P11 / ACC-7811) or different ids resolves those rows to nothing and
+    their three cells are never computed — a silent zero on every affected borrower. But the
+    pairing is right there in the data: txn_id carries the scenario and the row carries the
+    account. Pair them by majority vote so a handful of malformed rows cannot rename a
+    borrower, and let `config.set_scenario_map` adopt the result."""
+    pairs: dict[str, Counter] = defaultdict(Counter)
+    for t in txns:
+        m = TXN_RE.search(getattr(t, "txn_id", "") or "")
+        a = ACC_RE.search((getattr(t, "account_id", "") or "").strip())
+        if not (m and a):
+            continue
+        acc = a.group(0).upper().replace("ACC", "ACC-").replace("--", "-")
+        pairs[m.group(1).upper()][acc] += 1
+    return {sc: c.most_common(1)[0][0] for sc, c in pairs.items() if c}
+
+
+def refresh_known_scenarios() -> None:
+    """Re-snapshot the scenario lookup after the map changes (it is built at import)."""
+    _KNOWN_SCENARIOS.clear()
+    _KNOWN_SCENARIOS.update({s.upper(): s for s in SCENARIO_TO_ACC})
+
+
+def reresolve(txns: list) -> int:
+    """Re-run scenario resolution over already-loaded rows; returns how many changed."""
+    n = 0
+    for t in txns:
+        sc = _scenario_of(t.txn_id, t.account_id)
+        if sc != t.scenario:
+            t.scenario = sc
+            n += 1
+    return n
 
 
 def _scenario_of(txn_id: str, account_id: str) -> str:
