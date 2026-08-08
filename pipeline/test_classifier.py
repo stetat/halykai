@@ -107,6 +107,47 @@ def run_keyword():
     return passed
 
 
+def run_fallback_experiment():
+    """Is `--classifier hybrid` actually worth its quota? Measured, not assumed. Costs 2 calls.
+
+    Hybrid REPLACES the sign fallback with the LLM on rows no rule decides, so it can hurt as
+    easily as help. The 149 held-out narrations are burned for the keyword table — every fix
+    was fitted to them — but the LLM has never seen one, so they remain a fair benchmark for
+    it. Two populations matter and they point opposite ways:
+
+      rows the fallback CAN express (true label revenue/opex): the sign of the amount is
+        already an excellent guess, and the LLM is slightly worse.
+      rows it CANNOT (capex, tax, lease, utilities, interest, insurance): the fallback is
+        wrong by construction — it has no way to emit those categories at all.
+
+    Measured 2026-08-08: 35/35 vs 34/35 on the first, 0/110 vs 110/110 on the second. So hybrid
+    pays off once more than ~3% of unmatched rows are something other than revenue or opex —
+    (1-p)*0.03 < p — which any real ledger clears easily."""
+    from .test_holdout import HELDOUT, HELDOUT_B, HELDOUT_C, _mk
+    from .heldout_d import HELDOUT_D
+    pool = HELDOUT + HELDOUT_B + HELDOUT_C + list(HELDOUT_D)
+
+    expressible, hard = [], []
+    for i, (d, cp, w, inf) in enumerate(pool, 1):
+        t = _mk(d, cp, inf)
+        t.txn_id = f"TXN-K-{i:04d}"
+        guess = "revenue" if inf else "opex"
+        (expressible if w in ("revenue", "opex") else hard).append((t, w, guess))
+
+    print("\nIs the LLM worth spending on the rows no rule decides?")
+    for label, group in (("fallback CAN express (revenue/opex)", expressible),
+                         ("fallback CANNOT express (everything else)", hard)):
+        if not group:
+            continue
+        sign = sum(1 for _, w, g in group if w == g)
+        try:
+            pred = classifier.classify_batch([t for t, _, _ in group])
+            llm = sum(1 for t, w, _ in group if pred.get(t.txn_id) == w)
+            print(f"  {label:<42} sign {sign:>3}/{len(group):<3} | LLM {llm:>3}/{len(group)}")
+        except Exception as e:
+            print(f"  {label:<42} sign {sign:>3}/{len(group):<3} | LLM failed: {e}")
+
+
 def run_hybrid_routing():
     """`classify_hybrid` must ask the LLM about the UNDECIDED rows and nobody else — offline.
 

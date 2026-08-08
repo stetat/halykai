@@ -57,12 +57,13 @@ _DEBT_CTX = ("займ", "кредит", "облигац", "овердрафт",
 # A prepayment or advance is a buy verb only in company of an asset noun (below), so the
 # common "авансовый платёж за <услуги>" stays opex. English forms matter: the ledger carries
 # supplier narrations from Turkish, Chinese and German vendors.
-_BUY = ("приобрет", "покупк", "закуп", "поставк", "монтаж", "аванс",
+_BUY = ("приобрет", "покупк", "закуп", "поставк", "монтаж", "аванс", "устройств",
         "prepayment", "purchase", "acquisition", "advance payment", "supply of")
 _ASSET = ("оборудован", "техник", "кран", "тягач", "грузов", "погрузчик", "машин",
           "автопарк", "транспортн", "корпус", "здани", "склад", "экскаватор",
           "станок", "установк", "сооружен", "лини", "ктп", "подстанц", "жабдық",
-          "excavator", "equipment", "crane", "machinery", "vehicle", "truck", "loader")
+          "excavator", "equipment", "crane", "machinery", "vehicle", "truck", "loader",
+          "железнодорожн", "тупик", "причал", "цех", "путей")
 
 
 # Kazakh is an official language and the banks emit it, but this table was Russian-only, so
@@ -120,14 +121,39 @@ _TOKEN_RE: dict[str, re.Pattern] = {}
 # abbreviations that are whole words in their own right.
 _CLOSED = {"фот", "опв", "осмс", "ктп", "огпо"}
 
+# Requiring a leading word boundary for Cyrillic too was overcorrecting. Russian builds words
+# with prefixes that PRESERVE meaning — "СУБаренда" is still rent, "ДОоборудование" is still
+# equipment, "ПРЕДоплата" is still payment — and a strict \b threw all of them away. Only a
+# NEGATING prefix flips the sense, and there are few of them: "БЕСпроцентный" is the opposite
+# of interest. So Cyrillic stems may match inside a word unless a negation sits immediately in
+# front. ASCII keeps both boundaries, since Latin abbreviations genuinely do hide inside longer
+# words rather than attach to them.
+_NEGATING = ("без", "бес", "не", "анти", "контр")
+_NEG_RE = re.compile("(?:" + "|".join(_NEGATING) + r")$", re.UNICODE)
+
 
 def _tok(kw: str) -> re.Pattern:
     rx = _TOKEN_RE.get(kw)
     if rx is None:
-        both = kw.isascii() or kw in _CLOSED
-        rx = _TOKEN_RE[kw] = re.compile(
-            r"\b" + re.escape(kw) + (r"\b" if both else ""), re.UNICODE)
+        if kw.isascii() or kw in _CLOSED:
+            pat = r"\b" + re.escape(kw) + r"\b"
+        else:
+            pat = re.escape(kw)                 # stem: any position, negation checked below
+        rx = _TOKEN_RE[kw] = re.compile(pat, re.UNICODE)
     return rx
+
+
+def _matches(kw: str, blob: str) -> bool:
+    """Token search that tolerates meaning-preserving prefixes but not negating ones."""
+    for m in _tok(kw).finditer(blob):
+        head = blob[:m.start()]
+        # a match at a word boundary is always good; inside a word it must not follow a negation
+        if not head or not head[-1].isalnum():
+            return True
+        word_head = re.split(r"[^\w]", head)[-1]
+        if not _NEG_RE.search(word_head):
+            return True
+    return False
 
 
 # "НДС"/"VAT" name the tax only when the payment IS the tax. On a Kazakh invoice narration the
@@ -140,11 +166,11 @@ _VAT_MENTION = ("в т.ч", "в том числе", "вкл. ндс", "вклю�
 
 def _rule_applies(kw: str, blob: str) -> bool:
     """Whether a rule token fires, including its exceptions."""
-    if not _tok(kw).search(blob):
+    if not _matches(kw, blob):
         return False
     if kw in ("вознагражден", "сыйақы"):
         # a management fee or a plain fee is not interest — see _DEBT_CTX above
-        return "управленческ" not in blob and any(_tok(d).search(blob) for d in _DEBT_CTX)
+        return "управленческ" not in blob and any(_matches(d, blob) for d in _DEBT_CTX)
     if kw in ("ндс", "vat"):
         return not any(m in blob for m in _VAT_MENTION)
     if kw == "персонал":
@@ -185,7 +211,7 @@ def categorize_verbose(t) -> tuple[str, str, bool]:
 
     # "Оплата % по договору займа" — the percent SIGN carries the meaning and no word matches,
     # so "займ" would otherwise book an interest payment as a financing drawdown.
-    if "%" in blob and any(_tok(d).search(blob) for d in _DEBT_CTX):
+    if "%" in blob and any(_matches(d, blob) for d in _DEBT_CTX):
         return INTEREST, "percent-sign", False
 
     hits = [(kw, cat) for kw, cat in _RULES if _rule_applies(kw, blob)]
