@@ -21,7 +21,7 @@ from .engine import (Categorizer, Reclass, CAPEX, OPEX, LEASE, REVENUE,
                      GROUP_CAPEX, UNRESTRICTED_ASSETS, INSURANCE, PAYROLL)
 
 LEDGER_KINDS = {"CAPEX_INTENSITY", "MIN_REVENUE", "RELATED_PARTY_ABS",
-                "RELATED_PARTY_RATIO", "GENERIC"}
+                "RELATED_PARTY_RATIO", "GENERIC", "MAX_LINE", "REVENUE_LESS_MAX"}
 
 
 def _tx(txn_id, cat, amount):
@@ -73,17 +73,38 @@ def build_cell(sc, cid, spec, kcell):
             reclasses = [Reclass(ev, RELATED_PARTY, OTHER, applied=True)]
         else:
             txns = [_tx(f"TXN-{sc}-rp", RELATED_PARTY, -Ae)]
-    elif kind == "RELATED_PARTY_RATIO":          # related/revenue = Ae
+    elif kind == "RELATED_PARTY_RATIO":          # related/<base> = Ae
+        # The base is revenue for most contracts but OPEX for P6 6.1 ("0.08x Операционных
+        # расходов"); build whichever the clause names so the fixture tracks the engine.
+        _t = f"{spec.get('name','')} {spec.get('raw_text','')}".lower()
+        base_cat = OPEX if "операционных расход" in _t else REVENUE
         rev = 10_000_000.0
+        base_amt = rev if base_cat == REVENUE else -rev
         if breach_ev:
             base_rp = round(T * 0.99 * rev, 2)   # ratio just below T (compliant)
             ev_amt = round(Ae * rev - base_rp, 2)
-            txns = [_tx(f"TXN-{sc}-r", REVENUE, rev),
+            txns = [_tx(f"TXN-{sc}-r", base_cat, base_amt),
                     _tx(f"TXN-{sc}-rp", RELATED_PARTY, -base_rp), _tx(ev, OTHER, -ev_amt)]
             reclasses = [Reclass(ev, RELATED_PARTY, OTHER, applied=True)]
         else:
-            txns = [_tx(f"TXN-{sc}-r", REVENUE, rev),
+            txns = [_tx(f"TXN-{sc}-r", base_cat, base_amt),
                     _tx(f"TXN-{sc}-rp", RELATED_PARTY, -Ae * rev)]
+    elif kind == "MAX_LINE":                     # max(line1, line2, ...) = Ae, NOT their sum
+        cats = [c for c in engine.spec_categories(spec) if c != REVENUE]
+        if not cats:
+            return None
+        txns = [_tx(f"TXN-{sc}-m0", cats[0], -Ae)]
+        txns += [_tx(f"TXN-{sc}-m{i}", c, -round(Ae * 0.5, 2))
+                 for i, c in enumerate(cats[1:], 1)]
+        extras = {"categories": cats}
+    elif kind == "REVENUE_LESS_MAX":             # revenue - max(line1, line2, ...) = Ae
+        cats = [c for c in engine.spec_categories(spec) if c != REVENUE]
+        if not cats:
+            return None
+        big = 1_000_000.0
+        txns = [_tx(f"TXN-{sc}-rev", REVENUE, Ae + big), _tx(f"TXN-{sc}-m0", cats[0], -big)]
+        txns += [_tx(f"TXN-{sc}-m{i}", c, -0.5 * big) for i, c in enumerate(cats[1:], 1)]
+        extras = {"categories": cats}
     elif kind == "GENERIC":                       # sum(distinct category) = Ae
         cat = f"gen_{sc}_{cid}"
         txns = [_tx(f"TXN-{sc}-{cid}", cat, -Ae)]
@@ -135,6 +156,9 @@ def build_cell(sc, cid, spec, kcell):
         elif fid == "insurance_cover":             # insurance / (lease+utilities) = Ae
             txns = [_tx(f"TXN-{sc}-ins", INSURANCE, -Ae * D),
                     _tx(f"TXN-{sc}-le", LEASE, -0.5 * D), _tx(f"TXN-{sc}-ut", UTILITIES, -0.5 * D)]
+        elif fid == "revenue_cover_payroll_util":  # revenue / (payroll+utilities) = Ae
+            txns = [_tx(f"TXN-{sc}-rev", REVENUE, Ae * D),
+                    _tx(f"TXN-{sc}-pay", PAYROLL, -0.5 * D), _tx(f"TXN-{sc}-ut", UTILITIES, -0.5 * D)]
         else:
             return None
     else:

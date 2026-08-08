@@ -108,9 +108,12 @@ keywords don't cover, so recalibrate both against the actual ledger on event day
   **36.000/36 = 1.0000** graded by the real scorer against the real key, with **9/9** evidence
   transactions recovered via leave-one-out.
 - Scorer self-test = **1.0000**.
-- Deterministic classifier on the labelled fixture: **22/22 = 100%**, no API calls, with all
-  10 formula categories reachable offline (was 23% before the stale-copy fix). Fixture is
-  hand-built by us — a calibration signal, not a guarantee.
+- Deterministic classifier: **31/31 = 100%**, no API calls, with all 10 formula categories
+  reachable offline (was 23% before the stale-copy fix). 9 of the 31 rows are built from
+  vocabulary **mined out of the actual PDFs** — the contracts' own category labels and real
+  counterparty names — rather than invented by us; the other 22 are hand-written, so treat
+  this as a calibration signal, not a guarantee.
+- Engine metric-definition tests: **9/9**, each written against real mined clause wording.
 - Ledger dialect torture-test (`python -m pipeline.test_ledger`): **all pass** — 8 formats
   parse identically, plus FX and number-parsing edge cases.
 - Hostile-dialect round trip (`python -m pipeline.test_roundtrip`): the same 36 cells pushed
@@ -131,10 +134,26 @@ handled by a general ratio engine (`engine.ratio_formula`):
 | tax_util_ebitda | (Taxes+Utilities) / EBITDA | P7 6.1 |
 | unrestricted_assets | AssetsToUnrestrictedSubs / Capex | P9 6.1 |
 | insurance_cover | Insurance / (Lease+Utilities) | P10 6.1 |
+| revenue_cover_payroll_util | Revenue / (Payroll+Utilities) | P6 6.2 |
+
+Three covenants are **not** category sums and were being computed wrong until the clause
+text was read properly (all found by mining the PDFs, all now pinned by `test_engine`):
+
+| cell | clause says | correct metric | the trap |
+|---|---|---|---|
+| B1 6.2 | "по отдельности, а **не в совокупности** … по **наибольшей** из указанных сумм; их сумма **не является** показателем" | `max(payroll, utilities)` | summing them turns a COMPLIANT cell into a BREACH |
+| P10 6.2 | "Выручка **за вычетом наибольшей** из величин Расходов на оплату труда и Налогов" | `revenue − max(payroll, tax)` | also contains "наибольш", but is a different covenant from B1 6.2 |
+| P6 6.1 | "превышал 0.08x **Операционных расходов**" | `related / opex` | every other related-party ratio divides by revenue |
 
 `reconstruct.py` is an integration fixture: it synthesises a ledger that reproduces the key's
 actuals, then proves the ledger→status/actual/evidence→score chain has no wiring/arithmetic/
 rounding/evidence bugs. It is not a generalisation score.
+
+**It also cannot catch a wrong metric definition** — it builds inputs that satisfy whatever
+formula the engine uses, so a wrong formula still scores 36/36. `validate.py` can't either;
+it only bracket-checks thresholds. 13 of 36 cells were computing the wrong quantity while
+both harnesses read green. Only the metric-definition tests in `test_engine.py`, written
+against clause wording mined from the PDFs, pin this down. **When in doubt, read the clause.**
 
 ## Gemini notes
 - Key authenticates as a query-param key. `gemini-2.5-*` is gated on it; use the `-latest`

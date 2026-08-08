@@ -54,7 +54,10 @@ def keyword_category(t) -> str:
              ("водоснаб", UTILITIES), ("водоотвед", UTILITIES), ("коммунал", UTILITIES),
              ("электро", UTILITIES), ("тепло", UTILITIES), ("газоснаб", UTILITIES), ("utility", UTILITIES),
              ("страхов", INSURANCE), ("insurance", INSURANCE),
-             ("оплат труда", PAYROLL), ("зарплат", PAYROLL), ("заработн", PAYROLL), ("payroll", PAYROLL),
+             # "труда" (not "оплат труда") so the contracts' canonical label
+             # "Расходы на оплатУ труда" matches — the inflected form broke the substring.
+             ("труда", PAYROLL), ("персонал", PAYROLL), ("зарплат", PAYROLL),
+             ("заработн", PAYROLL), ("payroll", PAYROLL), ("фот", PAYROLL),
              ("финансирован", FINANCING), ("займ", FINANCING), ("кредитн", FINANCING), ("транш", FINANCING),
              ("выручк", REVENUE), ("продаж", REVENUE), ("реализац", REVENUE), ("revenue", REVENUE),
              ("операционн", OPEX), ("opex", OPEX)]

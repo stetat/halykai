@@ -9,6 +9,7 @@ Key design points, straight from CASE.ru.md:
    biggest/last contributor. Ratio & aggregate cells that no single txn decides -> null.
 """
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 from .ledger import Txn
@@ -108,7 +109,58 @@ def ratio_formula(spec: dict) -> dict | None:
     if has("страховых преми") and ("арендн" in t or "коммунальн" in t):
         return {"id": "insurance_cover", "num": [(1, INSURANCE)],
                 "den": [(1, LEASE), (1, UTILITIES)]}
+    # "Выручка ... не менее 3.00x совокупной величины Расходов на оплату труда и
+    # Коммунальных расходов" (P6 6.2)
+    if has("покрыт") and ("персонал" in t or "оплату труда" in t) and "коммунальн" in t:
+        return {"id": "revenue_cover_payroll_util", "num": [(1, REVENUE)],
+                "den": [(1, PAYROLL), (1, UTILITIES)]}
     return None
+
+
+# --- naming the metric a covenant actually bounds --------------------------------------
+# The contracts name their categories in a fixed vocabulary (confirmed by mining every PDF:
+# «Капитальные затраты», «Операционные расходы», «Расходы на оплату труда», «Коммунальные
+# расходы», «Процентные расходы», «Налоги», «Страховые премии»). A covenant that bounds one
+# category names it, usually inside «...» quotes.
+_RU_CATEGORY_LABELS = [
+    ("капитальн", CAPEX),
+    ("оплату труда", PAYROLL), ("оплате труда", PAYROLL), ("персонал", PAYROLL),
+    ("коммунальн", UTILITIES),
+    ("процентн", INTEREST),
+    ("налог", TAX),
+    ("страхов", INSURANCE),
+    ("аренд", LEASE), ("лизинг", LEASE),
+    ("операционн", OPEX),
+]
+
+# "связанные С НИМИ расходы" means "associated expenses" and has nothing to do with related
+# parties — requiring сторон/аффилир after it stops P6 6.2 (a payroll+utilities coverage
+# ratio) from being read as a related-party covenant.
+_RELATED_RE = re.compile(r"связанн\w*\s+сторон|со\s+связанными\s+сторонами|аффилир|related[\s-]part")
+
+
+def _labels_in(fragment: str) -> list[str]:
+    """Every category named in `fragment`, ordered by where it appears. Order matters:
+    a covenant listing "Расходов на оплату труда и Налогов" bounds both, and returning
+    only the first would silently drop a term from the metric."""
+    f = fragment.lower()
+    found = [(f.find(kw), cat) for kw, cat in _RU_CATEGORY_LABELS if kw in f]
+    out: list[str] = []
+    for _, cat in sorted(found):
+        if cat not in out:
+            out.append(cat)
+    return out
+
+
+def spec_categories(spec: dict) -> list[str]:
+    """Categories this covenant names — «quoted» defined terms win, else scan the clause."""
+    text = f"{spec.get('name','')} {spec.get('metric','')} {spec.get('raw_text','')}"
+    quoted: list[str] = []
+    for q in re.findall(r"«([^»]{3,60})»", text):
+        for c in _labels_in(q):
+            if c not in quoted:
+                quoted.append(c)
+    return quoted or _labels_in(text)
 
 
 # --- covenant kinds -------------------------------------------------------------------
@@ -116,7 +168,7 @@ def classify_kind(spec: dict) -> str:
     text = f"{spec.get('name','')} {spec.get('metric','')} {spec.get('raw_text','')}".lower()
     unit = spec.get("unit")
     def has(*ks): return any(k in text for k in ks)
-    related = has("связан", "аффилир", "related-party", "related party", "related")
+    related = bool(_RELATED_RE.search(text))
     if has("капиталоёмк", "capital intensity"):
         return "CAPEX_INTENSITY"
     # The threshold UNIT decides absolute-aggregate vs ratio covenants.
@@ -130,6 +182,15 @@ def classify_kind(spec: dict) -> str:
     # absolute ($) aggregates
     if related:
         return "RELATED_PARTY_ABS"
+    # Two different covenants both say "наибольш", and conflating them is a real trap:
+    #  P10 6.2 "Выручка ЗА ВЫЧЕТОМ наибольшей из величин Расходов на оплату труда и
+    #           Налогов" -> Revenue - max(payroll, tax)
+    #  B1  6.2 "Соблюдение проверяется по наибольшей из указанных сумм; их сумма НЕ
+    #           является показателем" -> max(payroll, utilities), never their sum
+    if has("за вычетом") and has("наибольш"):
+        return "REVENUE_LESS_MAX"
+    if has("наибольш") or has("не в совокупности"):
+        return "MAX_LINE"
     if has("выручк", "revenue") and spec.get("operator") in (">=", ">"):
         return "MIN_REVENUE"
     return "GENERIC"
@@ -153,9 +214,20 @@ def compute_actual(kind: str, txns: list[Txn], catf: Categorizer,
     if kind == "RELATED_PARTY_ABS":
         return _sum(txns, RELATED_PARTY, catf, ignore)
     if kind == "RELATED_PARTY_RATIO":
-        rev = _sum(txns, REVENUE, catf, ignore) or extras.get("revenue")
+        # The base differs per contract: most say "0.0Nx от выручки", but P6 6.1 says
+        # "0.08x Операционных расходов". Using revenue for both silently mis-scales it.
+        base_cat = extras.get("rp_base", REVENUE)
+        base = _sum(txns, base_cat, catf, ignore) or extras.get("revenue")
         rp = _sum(txns, RELATED_PARTY, catf, ignore)
-        return rp / rev if rev else None
+        return rp / base if base else None
+    if kind == "MAX_LINE":
+        cats = extras.get("categories") or []
+        sums = [_sum(txns, c, catf, ignore) for c in cats]
+        return max(sums) if sums else None
+    if kind == "REVENUE_LESS_MAX":
+        cats = extras.get("categories") or []
+        sums = [_sum(txns, c, catf, ignore) for c in cats]
+        return _sum(txns, REVENUE, catf, ignore) - (max(sums) if sums else 0.0)
     if kind == "LEVERAGE":
         ebitda = extras.get("ebitda")
         debt = extras.get("total_debt")
@@ -190,6 +262,19 @@ def evaluate(spec: dict, txns: list[Txn], catf: Categorizer,
     formula = ratio_formula(spec) if kind == "RATIO" else None
     if formula:
         extras.setdefault("formula", formula)
+    # Resolve which category/base the covenant text actually names, so the metric matches
+    # the clause rather than a per-kind default.
+    text = f"{spec.get('name','')} {spec.get('metric','')} {spec.get('raw_text','')}".lower()
+    if kind == "RELATED_PARTY_RATIO":
+        extras.setdefault("rp_base", OPEX if "операционных расход" in text else REVENUE)
+    elif kind == "GENERIC":
+        cats = spec_categories(spec)
+        if cats and "category" not in extras:
+            extras["category"] = cats[0]
+    elif kind in ("MAX_LINE", "REVENUE_LESS_MAX"):
+        # REVENUE is the outer term, not one of the lines being maximised over.
+        extras.setdefault("categories",
+                          [c for c in spec_categories(spec) if c != REVENUE])
     actual = compute_actual(kind, txns, catf, extras)
     if actual is None or thr is None:
         return Result("UNKNOWN", None, None, kind, {"reason": "insufficient data"})

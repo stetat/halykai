@@ -41,6 +41,23 @@ LABELS = [
     ("IT Services LLP", "Абонентская плата за ПО учёта", -9500, OPEX),
 ]
 
+# Rows built from vocabulary MINED OUT OF THE ACTUAL PDFs rather than invented by us:
+# the contracts' own category labels («Капитальные затраты», «Расходы на оплату труда»,
+# «Коммунальные расходы», «Процентные расходы», «Налоги», «Страховые премии») and real
+# counterparties that appear in the documents. Closest available proxy for the real ledger.
+MINED_LABELS = [
+    ("State Revenue Committee", "Уплата корпоративного подоходного налога", -125000, TAX),
+    ("Halyk Bank", "Процентные расходы по старшему обеспеченному займу", -88000, INTEREST),
+    ("KEGOC JSC", "Коммунальные расходы: электроэнергия за период", -41000, UTILITIES),
+    ("Jusan Insurance JSC", "Страховые премии по договору страхования", -31000, INSURANCE),
+    ("Internal", "Расходы на оплату труда производственного персонала", -210000, PAYROLL),
+    ("StroyMontazh LLP", "Капитальные затраты: строительство складского корпуса", -640000, CAPEX),
+    ("Office World", "Операционные расходы по текущей деятельности", -4300, OPEX),
+    ("Saryarka Terminal Properties LLP", "Аренда причальной инфраструктуры", -75000, LEASE),
+    ("Development Bank of KZ", "Поступление транша по кредитной линии", 2000000, FINANCING),
+]
+LABELS = LABELS + MINED_LABELS
+
 
 def _mk(i, cp, desc, amt):
     t = Txn(f"TXN-P1-{i:04d}", "ACC-7801", "2025-05-01", amt, "USD", cp, desc, "P1")
