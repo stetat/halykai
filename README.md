@@ -58,8 +58,25 @@ Only holders at or above that bar qualify. The dossiers are seeded with near-mis
 a stake shown as 48.0% in the table is held indirectly, with the Group's real voting rights
 disclosed further down as 27.3% — below that dossier's 30.0% bar, so it does **not** qualify.
 Previously `related_parties()` returned every company name in the file, which inflates all
-12 related-party cells. 10/12 borrowers resolve; **P2 and P6 ship no ownership dossier** in
-this release, so `solve` warns rather than silently reporting a confident COMPLIANT on 0.
+12 related-party cells. 10/12 borrowers resolve.
+
+**P2 and P6 are missing their ownership data, in two different ways** (searched exhaustively
+by `KYC-ACC-nnnn` registration number across all 200 files):
+
+| account | dossier | ownership section |
+|---|---|---|
+| ACC-7802 (P2) | exists — `6686c0493014.pdf`, `KYC-ACC-7802-2025` | **omitted** |
+| ACC-7806 (P6) | **none filed** | — |
+
+P2's dossier is otherwise complete and even states *"В состав досье включены … сведения о
+структуре владения"* — then never shows them. The audit note confirms related-party
+transactions exist but names nobody. This looks deliberate, like the withheld ledger.
+
+For those two, `solve` warns and falls back to **description hints**
+(`classifier.looks_related_party`: материнск / аффилирован / внутригруппов / общего центра
+услуг / управленческое вознаграждение …). The contracts say identity governs, *"а не
+назначением платежа"*, so this is knowingly the weaker signal — used only because the
+alternative is a confident `0` and a false COMPLIANT. **Re-check the archive on event day.**
 
 ## Event-day ingestion hardening
 The case states the ledger is **one file for all borrowers, multi-currency, expenses

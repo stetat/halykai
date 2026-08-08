@@ -107,6 +107,14 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
                 catf = Categorizer(base_classifier, rcs, related_parties=rps)
         else:
             catf = Categorizer(base_classifier, rcs, related_parties=rps)
+        if not rps:
+            # No KYC ownership list for this borrower (ACC-7802's dossier omits the section,
+            # ACC-7806 files none). Identity is unavailable, so fall back to description
+            # hints — a worse signal than the contracts mandate, but strictly better than
+            # reporting a confident 0 on a related-party covenant.
+            inner = catf.base
+            catf.base = lambda t: (RELATED_PARTY if classifier.looks_related_party(t)
+                                   else inner(t))
         for cid in ("6.1", "6.2", "6.3"):
             spec = covs.get(cid)
             if not spec:
@@ -114,8 +122,9 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
             # A related-party covenant with an empty KYC list computes 0 and reports a
             # confident COMPLIANT — the most dangerous kind of wrong answer here.
             if not rps and "RELATED" in engine.classify_kind(spec):
-                print(f"!! {sc} {cid} is a related-party covenant but no related parties "
-                      f"were resolved for {acc}; it will compute 0. Check the KYC dossier.")
+                print(f"!! {sc} {cid} is a related-party covenant but {acc} has no KYC "
+                      f"ownership list; falling back to description hints. Re-check the "
+                      f"archive for a dossier — identity, not description, is authoritative.")
             # One bad cell must never cost us the other 35.
             try:
                 res = engine.evaluate(spec, txns, catf, rcs)

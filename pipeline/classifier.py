@@ -67,6 +67,21 @@ def keyword_category(t) -> str:
     return REVENUE if (t.amount_usd or t.amount) > 0 else OPEX
 
 
+# Last-resort related-party hints, used ONLY when the borrower has no KYC ownership list.
+# The contracts say identity governs, "а не назначением платежа" — so this is explicitly a
+# worse signal, justified only because the alternative is reporting a confident 0.
+# ACC-7802's dossier omits its ownership section and ACC-7806 has no dossier at all.
+_RP_HINTS = ("материнск", "аффилирован", "связанной стороне", "связанным сторонам",
+             "внутригруппов", "внутри группы", "группы компаний", "общего центра услуг",
+             "общий центр услуг", "управленческое вознаграждение", "management fee",
+             "related party", "intragroup", "intra-group")
+
+
+def looks_related_party(t) -> bool:
+    blob = f"{t.counterparty} {t.description}".lower()
+    return any(h in blob for h in _RP_HINTS)
+
+
 def _prompt(txns, related_parties) -> str:
     cats = "\n".join(f"- {k}: {v}" for k, v in CATEGORIES.items())
     rp = ", ".join(sorted(related_parties)) if related_parties else "(список пуст)"
