@@ -7,8 +7,16 @@ decides, per borrower × covenant (clauses 6.1/6.2/6.3), `status` / `actual` / `
 Filenames and extensions are misdirection. Verified:
 - `master_ledger_2025.csv` is a **4-byte stub**; `ground_truth.json` is a **PDF trap**;
   `submission_template.json` is **pre-filled = the answer key** for this practice release.
-- 200 real PDFs → **12 borrowers** (`ACC-7201,7204,7801–7810`) ↔ 12 scenarios (`B1,B4,P1–P10`),
-  confirmed: audit reports cite `TXN-<scenario>-####` for their account.
+- 200 real PDFs → **12 borrowers** (`ACC-7201,7204,7801–7810`) ↔ 12 scenarios (`B1,B4,P1–P10`).
+  The mapping is **stated outright** in the Russian spec (`028324997d3c.pdf`, a `.pdf` that
+  is really markdown): `txn_id = TXN-P1-0039` → scenario `P1`, `account_id = ACC-7801`.
+- The spec and answer key are **not borrower documents**, but both name `ACC-7801` in that
+  example, so routing by ACC id alone files the specification under ACC-7801's audit reports
+  and its example transaction surfaces as one of P1's reclassifications. `docmap.SPEC_RE`
+  excludes them.
+- **No other hidden channel exists**: swept all PDFs for annotations, embedded files,
+  AcroForm fields, optional-content layers, JavaScript, XMP and `/Info` metadata — all
+  clean. Images are the only out-of-band carrier.
 - Every borrower has an **outdated 2024 contract** ("НЕДЕЙСТВУЮЩАЯ … НЕ ПРИМЕНЯЕТСЯ") and a
   **live 2025 contract**. Use only the live one. There are also **interim/draft** audit
   worksheets ("ПРОМЕЖУТОЧНАЯ … предварительн") that rank below the final audit report.

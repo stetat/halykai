@@ -21,6 +21,11 @@ KYC_RE = re.compile(r"KYC|клиентск\w+ дось|идентификаци\
 # because the dossiers mention "финансовой отчётностью" and so also match AUDIT_RE — the
 # elif routing below then filed them under "audits" (ACC-7809's dossier ended up there).
 STRONG_KYC_RE = re.compile(r"KYC-ACC-\d{4}|Досье\s+«?Знай своего клиент", re.I)
+# The challenge spec and the answer key are NOT borrower documents. Both name ACC-7801 in a
+# worked example ("txn_id = TXN-P1-0039 ... account_id = ACC-7801"), so routing by ACC id
+# alone files the specification itself under ACC-7801's audit reports — and its example
+# transaction then surfaces as one of that borrower's reclassifications.
+SPEC_RE = re.compile(r"Halyk AI Challenge|submission_template\.json|evidence_txn_id")
 
 
 @dataclass
@@ -36,6 +41,7 @@ class Doc:
     outdated: bool = False
     n_dead_markers: int = 0
     is_kyc_dossier: bool = False       # the authoritative ownership file, not a procedure
+    is_spec: bool = False              # challenge spec / answer key, not a borrower doc
 
 
 def classify(path: Path) -> Doc:
@@ -59,6 +65,7 @@ def classify(path: Path) -> Doc:
         has_covenants=has_cov, cov_year=year,
         outdated=outdated, n_dead_markers=n_dead,
         is_kyc_dossier=bool(STRONG_KYC_RE.search(text)),
+        is_spec=bool(SPEC_RE.search(text)),
     )
 
 
@@ -66,6 +73,8 @@ def build(save: bool = True) -> dict:
     docs = [classify(p) for p in sorted(config.DATASET.iterdir()) if p.is_file()]
     by_acc: dict[str, dict] = {}
     for d in docs:
+        if d.is_spec:            # never route the spec/key to a borrower
+            continue
         for acc in d.accs:
             by_acc.setdefault(acc, {"contracts": [], "audits": [], "kyc": [], "other": []})
             if d.has_covenants and d.is_contract:

@@ -47,6 +47,20 @@ for sc, v in _KEY.items():
 check("all documented evidence transactions recovered", recovered == documented,
       f"{recovered}/{documented}")
 
+# The challenge spec and the answer key both name ACC-7801 in a worked example, so routing
+# by ACC id alone files them under that borrower — and the spec's example transaction
+# (TXN-P1-0039) then surfaces as one of P1's reclassifications.
+_spec_docs = {n for n, d in _DM["docs"].items() if d.get("is_spec")}
+check("challenge spec + answer key are detected as spec files",
+      {"028324997d3c.pdf", "CASE.ru.md", "submission_template.json"} <= _spec_docs,
+      f"got {sorted(_spec_docs)}")
+for acc, groups in _DM["by_acc"].items():
+    routed = {n for names in groups.values() for n in names}
+    check(f"{acc}: no spec/answer-key document routed to it", not (routed & _spec_docs),
+          f"got {sorted(routed & _spec_docs)}")
+check("the spec's example txn TXN-P1-0039 is not a P1 reclassification",
+      "TXN-P1-0039" not in {r.txn_id for r in reclass.for_account("ACC-7801", _DM)})
+
 # A reclassification quoting another borrower (or the spec's example scenario T1) must not
 # leak into this borrower's set.
 for sc, acc in config.SCENARIO_TO_ACC.items():
