@@ -220,8 +220,38 @@ def test_generic_uses_the_quoted_category():
     print("ok  generic category covenant reads its «quoted» category")
 
 
+def test_refunds_net_against_their_category():
+    # The case states expenses are negative and income positive, so a refund of an expense
+    # is a positive row in that category. Taking abs() per transaction made refunds ADD.
+    txns = [
+        _t("TXN-X-0001", -1_000_000, desc="capex plant"),
+        _t("TXN-X-0002", 400_000, desc="capex refund"),      # supplier refund
+        _t("TXN-X-0003", 5_000_000, desc="revenue sales"),
+        _t("TXN-X-0004", -1_000_000, desc="revenue credit"),  # credit note
+    ]
+    catf = Categorizer(_base_classifier({"capex": CAPEX, "revenue": REVENUE}), reclasses=[])
+    assert abs(engine._sum(txns, CAPEX, catf) - 600_000) < 0.005, engine._sum(txns, CAPEX, catf)
+    assert abs(engine._sum(txns, REVENUE, catf) - 4_000_000) < 0.005
+    print("ok  refunds and credit notes net against a category, they do not add to it")
+
+
+def test_reclassified_category_labels_resolve():
+    # pdftotext breaks labels across lines; a literal-space pattern misses them, and the
+    # whole vocabulary must be covered or a reclassification lands in the unread OTHER bin.
+    cases = [("Расходы на оплату\n\nтруда", PAYROLL), ("Капитальные затраты", CAPEX),
+             ("Коммунальные  услуги", UTILITIES), ("Процентные расходы", "interest"),
+             ("Налоги", TAX), ("Страховые премии", "insurance"),
+             ("Консультационные услуги", OPEX), ("Операционные расходы", OPEX)]
+    for label, want in cases:
+        got = engine.label_to_category(label)
+        assert got == want, f"{label!r} -> {got}, want {want}"
+    print("ok  every reclassification target label maps to a real category")
+
+
 def main():
     test_capex_intensity_ratio_and_no_evidence()
+    test_refunds_net_against_their_category()
+    test_reclassified_category_labels_resolve()
     test_reclassification_flips_and_is_the_evidence()
     test_rejected_reclassification_is_not_evidence()
     test_min_revenue_breach_no_single_evidence()

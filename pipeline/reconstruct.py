@@ -125,11 +125,15 @@ def build_cell(sc, cid, spec, kcell):
                         _tx(f"TXN-{sc}-int", INTEREST, -D)]
         elif fid == "cover_sources":               # (rev+fin)/(opex+capex) = Ae
             if breach_ev:
-                e = 100_000.0
-                X = round(Ae * (D + e), 2)           # revenue reclassified into opex tips ratio
+                e = 200_000.0
+                X = round(Ae * (D + e), 2)           # denominator grows by e when applied
+                # The evidence transaction is an OUTFLOW reclassified INTO opex, which is
+                # how every reclassification in the real documents looks (expense->expense).
+                # Modelling it as an inflow only "increased" opex under the old abs()-per-
+                # transaction summing; with correct netting an inflow reduces the category.
                 txns = [_tx(f"TXN-{sc}-rev", REVENUE, X), _tx(f"TXN-{sc}-op", OPEX, -0.5 * D),
-                        _tx(f"TXN-{sc}-cap", CAPEX, -0.5 * D), _tx(ev, REVENUE, e)]
-                reclasses = [Reclass(ev, OPEX, REVENUE, applied=True)]
+                        _tx(f"TXN-{sc}-cap", CAPEX, -0.5 * D), _tx(ev, OTHER, -e)]
+                reclasses = [Reclass(ev, OPEX, OTHER, applied=True)]
             else:
                 txns = [_tx(f"TXN-{sc}-rev", REVENUE, Ae * D), _tx(f"TXN-{sc}-op", OPEX, -0.5 * D),
                         _tx(f"TXN-{sc}-cap", CAPEX, -0.5 * D)]

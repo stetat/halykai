@@ -3,7 +3,9 @@
 Key design points, straight from CASE.ru.md:
  * The ledger has NO category column. Categories come from (1) auditor reclassifications
    (highest priority) and (2) a base classifier over counterparty/description.
- * `actual` is always the POSITIVE magnitude of the metric the covenant bounds.
+ * `actual` is the magnitude of the metric the covenant bounds. Category aggregates net
+   signed amounts first (so refunds reduce a category), then take the magnitude; metrics
+   that can legitimately go negative (margins, revenue-less-largest-line) keep their sign.
  * `evidence_txn_id` is the SINGLE transaction whose reclassification/inclusion/exclusion
    flips the verdict — found by leave-one-out over the reclassified set, NOT by picking the
    biggest/last contributor. Ratio & aggregate cells that no single txn decides -> null.
@@ -77,13 +79,18 @@ class Categorizer:
 
 
 def _amt(t: Txn) -> float:
-    """USD magnitude of a transaction (expenses stored negative -> abs)."""
-    v = t.amount_usd if t.amount_usd is not None else t.amount
-    return abs(v)
+    """Signed USD amount of a transaction (expenses negative, income positive)."""
+    return t.amount_usd if t.amount_usd is not None else t.amount
 
 
 def _sum(txns: list[Txn], cat: str, catf: Categorizer, ignore: str | None = None) -> float:
-    return sum(_amt(t) for t in txns if catf.category(t, ignore_reclass=ignore) == cat)
+    """Magnitude of a category: sum the SIGNED amounts, then take the magnitude.
+
+    Taking abs() per transaction instead would make refunds, credit notes and reversals
+    ADD to a category rather than net against it — a $400k refund against $1.0M of capex
+    would report $1.4M. Netting first is both correct accounting and the only reading
+    consistent with the case's stated sign convention."""
+    return abs(sum(_amt(t) for t in txns if catf.category(t, ignore_reclass=ignore) == cat))
 
 
 def _cat_value(txns, cat, catf, ignore=None) -> float:
@@ -139,14 +146,31 @@ def ratio_formula(spec: dict) -> dict | None:
 # category names it, usually inside «...» quotes.
 _RU_CATEGORY_LABELS = [
     ("капитальн", CAPEX),
-    ("оплату труда", PAYROLL), ("оплате труда", PAYROLL), ("персонал", PAYROLL),
+    ("оплату труда", PAYROLL), ("оплате труда", PAYROLL), ("оплаты труда", PAYROLL),
+    ("персонал", PAYROLL), ("заработн", PAYROLL),
     ("коммунальн", UTILITIES),
     ("процентн", INTEREST),
     ("налог", TAX),
     ("страхов", INSURANCE),
     ("аренд", LEASE), ("лизинг", LEASE),
+    ("консультационн", OPEX),          # «Консультационные услуги» — an opex line
     ("операционн", OPEX),
+    ("аффилирован", RELATED_PARTY),
+    ("выручк", REVENUE),
 ]
+
+
+def label_to_category(text: str | None) -> str:
+    """Map ONE Russian category label (e.g. «Расходы на оплату труда») to a category.
+
+    Shared with reclass.py so the reclassification parser and the covenant parser cannot
+    drift apart. Whitespace is normalised first: pdftotext breaks labels across lines
+    ('Расходы на оплату\\n\\nтруда'), which defeats any literal-space pattern."""
+    if not text:
+        return OTHER
+    flat = re.sub(r"\s+", " ", text)
+    found = _labels_in(flat)
+    return found[0] if found else OTHER
 
 # "связанные С НИМИ расходы" means "associated expenses" and has nothing to do with related
 # parties — requiring сторон/аффилир after it stops P6 6.2 (a payroll+utilities coverage
@@ -311,5 +335,9 @@ def evaluate(spec: dict, txns: list[Txn], catf: Categorizer,
             if alt is not None and _status(op, alt, thr) == "COMPLIANT":
                 evidence = r.txn_id
                 break
-    return Result(status, round(abs(actual), 2), evidence, kind,
+    # No abs() here: category aggregates are already magnitudes (see _sum), so a negative
+    # value now only arises where the sign is real — a loss-making EBITDA margin, or
+    # revenue below its largest overhead line. Reporting those as positive would invert
+    # the finding.
+    return Result(status, round(actual, 2), evidence, kind,
                   {"threshold": thr, "operator": op, "active": active})

@@ -10,18 +10,13 @@ Only APPLIED reclassifications change `actual`; the REJECTED ones are traps (and
 from __future__ import annotations
 import re
 from . import config, docmap, pdftext
-from .engine import (Reclass, CAPEX, OPEX, LEASE, REVENUE, RELATED_PARTY,
-                     INSURANCE, PAYROLL, OTHER)
+from .engine import Reclass, OTHER, label_to_category as engine_label_to_category
 
-_CAT_MAP = [
-    (r"капитальн\w+ затрат|капвложен", CAPEX),
-    (r"операционн\w+ расход", OPEX),
-    (r"арендн\w+|лизинг", LEASE),
-    (r"выручк", REVENUE),
-    (r"страхов\w+ преми", INSURANCE),
-    (r"оплат\w+ труда|заработн|payroll", PAYROLL),
-    (r"аффилированн|связанн\w+ сторон|related", RELATED_PARTY),
-]
+# Category labels are mapped by engine.label_to_category — ONE shared vocabulary, so the
+# reclassification parser and the covenant parser cannot drift apart. The previous local
+# copy had no entry for коммунальные / процентные / налоги / консультационные, so those
+# reclassification targets became OTHER: a bucket no covenant reads, silently dropping the
+# transaction from the metric it was reclassified into.
 REJECT_RE = re.compile(r"не\s+производил|сохран\w+|без\s+корректир|не\s+переклассифиц", re.I)
 INTERIM_RE = re.compile(r"промежуточн|предварительн|черновик|interim|preliminary", re.I)
 
@@ -38,13 +33,7 @@ _AMT_RE = re.compile(r"\$\s*([0-9][0-9\s.,]*)")
 
 
 def _to_cat(text: str | None) -> str:
-    if not text:
-        return OTHER
-    low = text.lower()
-    for pat, cat in _CAT_MAP:
-        if re.search(pat, low):
-            return cat
-    return OTHER
+    return engine_label_to_category(text)
 
 
 def _amt(s: str | None) -> float | None:
