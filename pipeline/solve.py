@@ -13,28 +13,21 @@ from __future__ import annotations
 import argparse
 import json
 from . import config, docmap, covenants, reclass, engine, scorer, classifier, ledger as ledgermod
-from .engine import Categorizer, OTHER, CAPEX, OPEX, LEASE, REVENUE, RELATED_PARTY
+from .engine import Categorizer
 
 TEAM = "your-team-name"
 CONTACT = "adarhan76@gmail.com"
 MODEL = config.MODEL_PRO
 
-# Base keyword classifier over a txn's counterparty/description. Tune against the real
-# ledger on event day (this is the main data-dependent knob).
-_KEYWORDS = [
-    ("капитальн", CAPEX), ("capex", CAPEX), ("оборудован", CAPEX), ("основны", CAPEX),
-    ("аренд", LEASE), ("lease", LEASE), ("лизинг", LEASE),
-    ("выручк", REVENUE), ("revenue", REVENUE), ("продаж", REVENUE), ("реализац", REVENUE),
-    ("операционн", OPEX), ("opex", OPEX), ("расход", OPEX),
-]
-
-
-def base_classifier(t) -> str:
-    blob = f"{t.counterparty} {t.description}".lower()
-    for kw, cat in _KEYWORDS:
-        if kw in blob:
-            return cat
-    return OTHER
+# Base keyword classifier over a txn's counterparty/description — the main data-dependent
+# knob, and the ONLY classifier running whenever the Gemini free tier 429s.
+#
+# This is deliberately an alias, not a copy. A stale 14-keyword copy used to live here and
+# had silently diverged: it could only ever emit 4 of the 13 categories, so every ratio
+# covenant with interest/tax/utilities/insurance/financing in its denominator divided by
+# zero and produced UNKNOWN -> empty cell -> 0 points. It scored 23% where the shared
+# implementation scores 100% on the labelled fixture. Keep exactly one implementation.
+base_classifier = classifier.keyword_category
 
 
 def empty_cell():

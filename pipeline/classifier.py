@@ -34,7 +34,11 @@ _SYSTEM = ("Ты финансовый аналитик банка. Класси�
            "для проверки кредитных ковенантов. Отвечай СТРОГО одним JSON-объектом без пояснений.")
 
 
-def _keyword_fallback(t) -> str:
+def keyword_category(t) -> str:
+    """Deterministic categoriser: free, offline, and the ONLY thing running whenever the
+    Gemini free tier 429s. It is therefore a primary classifier, not just a fallback —
+    `solve.base_classifier` is this function. Keep the two paths identical; they silently
+    diverged once (a stale copy in solve.py scored 23% against this one's 100%)."""
     blob = f"{t.counterparty} {t.description}".lower()
     # capex: an acquisition/construction verb near a capital-asset noun (checked first)
     buy = any(w in blob for w in ("приобрет", "покупк", "закуп", "строительств",
@@ -128,7 +132,7 @@ def classify_batch(txns, related_parties=None, model=None, chunk=150) -> dict[st
                 out[t.txn_id] = cat
                 stats["llm"] += 1
             else:
-                out[t.txn_id] = _keyword_fallback(t)
+                out[t.txn_id] = keyword_category(t)
                 stats["fallback"] += 1
     classify_batch.last_stats = stats            # inspectable after the call
     return out
@@ -140,5 +144,5 @@ classify_batch.last_stats = {}
 def make_base_classifier(cat_map: dict[str, str]):
     """A base Classifier (Txn -> category) backed by the LLM map, keyword fallback otherwise."""
     def base(t):
-        return cat_map.get(t.txn_id) or _keyword_fallback(t)
+        return cat_map.get(t.txn_id) or keyword_category(t)
     return base

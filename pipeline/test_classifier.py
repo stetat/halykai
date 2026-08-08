@@ -48,6 +48,46 @@ def _mk(i, cp, desc, amt):
     return t
 
 
+def run_keyword():
+    """Accuracy of the DETERMINISTIC path — free, offline, no API, always runnable.
+
+    This is the path that actually runs by default and whenever Gemini 429s, so it gets a
+    test that never depends on quota. It also pins `solve.base_classifier` to the shared
+    implementation: the two were once separate copies, and the stale one could emit just
+    4 of 13 categories (23% here), silently zeroing every ratio covenant that divides by
+    interest/tax/utilities/insurance/financing."""
+    from . import solve
+    from .engine import Categorizer
+
+    same = solve.base_classifier is classifier.keyword_category
+    print(f"{'ok ' if same else 'FAIL'} solve.base_classifier is classifier.keyword_category")
+
+    txns = [_mk(i, cp, d, a) for i, (cp, d, a, _) in enumerate(LABELS, 1)]
+    catf = Categorizer(solve.base_classifier, [], related_parties=RELATED)
+    misses = [(d[:44], exp, catf.category(t))
+              for t, (cp, d, a, exp) in zip(txns, LABELS) if catf.category(t) != exp]
+    ok = len(LABELS) - len(misses)
+    print(f"Deterministic classifier accuracy: {ok}/{len(LABELS)} = {ok/len(LABELS):.0%} "
+          f"(no API calls)")
+    for d, e, p in misses:
+        print(f"{d:>46}  {e:>13} -> {p:<13}")
+
+    # Every category the covenant formulas consume must be reachable without an LLM.
+    from .engine import (CAPEX, OPEX, LEASE, REVENUE, INSURANCE, PAYROLL,
+                         FINANCING, INTEREST, TAX, UTILITIES)
+    reachable = {catf.category(t) for t in txns}
+    needed = {CAPEX, OPEX, LEASE, REVENUE, INSURANCE, PAYROLL, FINANCING, INTEREST,
+              TAX, UTILITIES}
+    gap = needed - reachable
+    print(f"{'ok ' if not gap else 'FAIL'} all formula categories reachable offline"
+          + (f" — MISSING {sorted(gap)}" if gap else ""))
+
+    passed = same and not misses and not gap
+    print("\n" + ("DETERMINISTIC CLASSIFIER OK" if passed
+                  else "DETERMINISTIC CLASSIFIER REGRESSION"))
+    return passed
+
+
 def run():
     txns = [_mk(i, cp, d, a) for i, (cp, d, a, _) in enumerate(LABELS, 1)]
     expected = {t.txn_id: LABELS[i][3] for i, t in enumerate(txns)}
@@ -80,4 +120,11 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    import sys
+    # default: the free offline test. `--gemini` additionally spends quota on the LLM path.
+    ok = run_keyword()
+    if "--gemini" in sys.argv:
+        print("\n" + "=" * 60)
+        run()
+    if not ok:
+        raise SystemExit(1)

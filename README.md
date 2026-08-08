@@ -78,11 +78,20 @@ python -m pipeline.cli solve --ledger LEDGER.csv  # -> submission.json (keyword 
 python -m pipeline.solve --ledger LEDGER.csv --classifier gemini   # Gemini categoriser
 python -m pipeline.cli score submission.json      # score vs answer key
 ```
-The classifier has two layers: a strong **deterministic** keyword/related-party layer (free,
-always available) and **Gemini** for ambiguous rows. Test it with:
+The classifier has two layers: a **deterministic** keyword/related-party layer (free, always
+available, and the only thing running when the free tier 429s) and **Gemini** for ambiguous
+rows. Because the free tier is small, treat the deterministic layer as the primary classifier
+and Gemini as the enrichment. Test it with:
 ```
-python -m pipeline.test_classifier   # labelled mini-ledger; prints accuracy + Gemini-vs-fallback source
+python -m pipeline.test_classifier             # deterministic path only — free, no API calls
+python -m pipeline.test_classifier --gemini    # additionally spends quota on the LLM path
 ```
+`solve.base_classifier` **is** `classifier.keyword_category` — one implementation, aliased,
+never copied. A stale copy previously lived in `solve.py` and had silently diverged: it could
+emit only 4 of the 13 categories, so every ratio covenant dividing by interest/tax/utilities/
+insurance/financing hit `den == 0` → `UNKNOWN` → empty cell → 0 points. It scored **23%** where
+the shared implementation scores **100%**. `test_classifier` now pins the alias and asserts every
+formula category is reachable offline, so the two paths cannot drift apart again.
 Free tier is **~20 requests/minute**. If you burn the minute, `classify_batch` catches the 429
 and falls back to keywords, and the harness prints `!! DEGRADED RUN` — so a rate-limited run
 is never mistaken for a real Gemini score. Re-run after ~60s for a clean Gemini number. The
@@ -99,6 +108,9 @@ keywords don't cover, so recalibrate both against the actual ledger on event day
   **36.000/36 = 1.0000** graded by the real scorer against the real key, with **9/9** evidence
   transactions recovered via leave-one-out.
 - Scorer self-test = **1.0000**.
+- Deterministic classifier on the labelled fixture: **22/22 = 100%**, no API calls, with all
+  10 formula categories reachable offline (was 23% before the stale-copy fix). Fixture is
+  hand-built by us — a calibration signal, not a guarantee.
 - Ledger dialect torture-test (`python -m pipeline.test_ledger`): **all pass** — 8 formats
   parse identically, plus FX and number-parsing edge cases.
 - Hostile-dialect round trip (`python -m pipeline.test_roundtrip`): the same 36 cells pushed
