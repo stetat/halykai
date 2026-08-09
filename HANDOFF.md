@@ -24,9 +24,11 @@ of them in a slide.
 `test_e2e` prints `TOTAL 27.600 / 36 = 0.7667`; that denominator includes the 7 cells the
 harness cannot materialise, scored 0. The status-agreement rate on what it *can* test is 29/29.
 
-**Uncommitted right now:** a circuit breaker in `classifier.classify_hybrid` (2 consecutive API
-failures → stop calling) plus its test and a clearer `solve` message. Tested and passing —
-commit it before anything else.
+Nothing is uncommitted. The circuit breaker in `classifier.classify_hybrid` (2 consecutive API
+failures → stop calling) is committed and tested.
+
+**Added since:** a retrieval layer (`retrieval.py`, `test_retrieval.py`) and `MODELS.md`. See
+§8 below — the honest numbers above are unchanged by it, which is the point.
 
 ---
 
@@ -189,16 +191,58 @@ prints `!! DEGRADED RUN`, so a rate-limited run is never mistaken for a real Gem
 
 ## 7. Documentation debt
 
-`README.md` claims "There is no OCR in this environment, so this step is deliberately human" and
-lists "Set `solve.TEAM` — it ships as the placeholder" as event-day step 0. Both are stale: OCR
-works via `cli ocr`, and TEAM is set. Fix before anyone else reads it.
+**Cleared.** `README.md`'s two stale claims (no OCR in this environment; set `solve.TEAM`) are
+fixed. `MODELS.md` now covers running the pipeline on a different model.
+
+---
+
+## 8. The retrieval layer — what it changed, and what it deliberately did not
+
+`retrieval.py` is BM25 over 1,309 passages from 189 documents, stdlib only, scoped by borrower
+and document kind. It exists because nothing in this pipeline retrieved anything: the
+classifier's LLM prompt was a category list *we* wrote, judged against Kazakh narrations, with
+the borrower's contract unread on disk. The prompt now carries the top passages from that
+borrower's own contract and audit report, each tagged with its source filename.
+
+**Nothing in the honest numbers moved**, and that is correct — retrieval only grounds the LLM
+path, and the LLM path only touches rows the keyword table could not decide. 113/149, 33/36 and
+the 29/29 e2e agreement are unchanged. `make_ledger`'s dress rehearsal still computes 36/36
+cells with 12/12 scenarios resolved.
+
+Three guards are tested, not assumed, because each is a silent poisoning channel:
+
+- the **spec and answer key are never indexed** (both name ACC-7801 in a worked example, so an
+  account-based retriever hands the answer key back as context);
+- the **2024 contracts are never indexed** (the version trap, at retrieval scale);
+- retrieval is **scoped to one borrower** — unscoped is worse than none, because another
+  borrower's clause reads as authoritative and names a different threshold.
+
+Writing `test_retrieval` found two live stemmer bugs, both the repo's signature inflection
+class: Kazakh two-letter suffixes were eating Russian words (`оплате` → `опла` via KZ `те`,
+while `оплату` → `оплат`, so two inflections of one word stopped sharing a stem), and `-ых/-их`
+was missing from the Russian ending table entirely. Kazakh endings are now gated on a
+Kazakh-specific letter and get the second stripping pass agglutination requires.
+
+**Definition mining is not in the decision path, and must not be autowired.** `cli definitions`
+extracts every sentence where a contract defines a category. Measured against the 149 held-out
+narrations, the mined terms fire on **1 of the 35** rows the keyword table cannot decide, and
+that one is wrong: it reads «услуги по подбору ПЕРСОНАЛА» as payroll where the table
+deliberately says opex. Net −1. The cause is a property of *this* corpus — the contracts define
+categories procedurally («суммы, отнесённые к данной статье»), not by membership — so there is
+nothing to mine. A new corpus may define membership, which is exactly what `cli definitions` is
+for on event day: **read it, then decide by hand.** `test_retrieval` fails if someone wires it
+in without re-measuring.
+
+Event-day use: when a cell looks wrong, run its narration through
+`python -m pipeline.cli retrieve "<narration>" --acc ACC-78xx` — the passages printed are the
+passages the model saw.
 
 ---
 
 ## Command reference
 
 ```
-python -m pipeline.cli {check,map,validate,solve,score,ocr}
+python -m pipeline.cli {check,map,validate,solve,score,ocr,retrieve,definitions}
 python -m pipeline.cli solve --ledger L.csv --fx FX.csv --classifier {keyword,gemini,hybrid}
 
 # free / offline — run all of these after any change
@@ -208,6 +252,7 @@ python -m pipeline.test_ledger         # 8 dialects, FX, number parsing
 python -m pipeline.test_roundtrip      # 36/36 through a hostile file
 python -m pipeline.test_docs           # real PDFs vs the key — the generalisation harness
 python -m pipeline.test_e2e            # non-circular end-to-end vs the key
+python -m pipeline.test_retrieval      # index, scoping, spec-leakage guard, grounded prompt
 python -m pipeline.test_holdout        # the two honest numbers
 
 python -m pipeline.test_classifier --gemini   # spends quota; reproduces the hybrid experiment

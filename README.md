@@ -34,6 +34,9 @@ pipeline/
   config.py       paths, .env loader, scenario<->account map
   pdftext.py      magic-byte typing + cached `pdftotext -raw` extraction
   docmap.py       classify all files, quarantine outdated contracts, pick current one
+  retrieval.py    BM25 passage index over the corpus (RU/KZ morphology folded in), scoped
+                  by borrower — grounds the classifier prompt in that borrower's own
+                  contract. Never indexes the spec/answer key or the 2024 contracts.
   covenants.py    Stage A: current contract -> covenant spec. Thresholds/operators are
                   parsed DETERMINISTICALLY (regex, exact, free); Gemini only enriches.
   reclass.py      auditor reclassifications (applied vs the rejected-trap) + related parties
@@ -94,8 +97,13 @@ Each image carries the same **threshold + near-miss decoy** structure as the tex
 P2's bar is 25.0% with a 23.4% decoy; P6's is 40.0% with a 38.1% decoy; P4's add-back floor
 is $300k with a $251k item that must **not** be added; P9's pledge bar is 50.0%.
 
-**Event day:** re-run `python -m pipeline.pdfimages`, *look at* the PNGs, update
-`image_facts.json`. There is no OCR in this environment, so this step is deliberately human.
+**Event day:** re-run `python -m pipeline.pdfimages`, then `python -m pipeline.cli ocr` reads
+any image nobody has transcribed using the model's vision, into `cache/image_facts_ocr.json`.
+Hand-verified entries in `image_facts.json` always win — a transcription checked against the
+picture beats one that was not — so OCR output never overwrites a verified fact in place.
+`pdfimages.untranscribed_image_docs()` detects a new image document and `solve` shouts about it.
+The vision OCR is validated against all 3 hand-verified documents: every threshold and amount
+exact.
 
 ## Event-day ingestion hardening
 The case states the ledger is **one file for all borrowers, multi-currency, expenses
@@ -130,6 +138,8 @@ python -m pipeline.test_engine                    # engine correctness tests
 python -m pipeline.cli solve --ledger LEDGER.csv  # -> submission.json (keyword classifier)
 python -m pipeline.solve --ledger LEDGER.csv --classifier gemini   # Gemini categoriser
 python -m pipeline.cli score submission.json      # score vs answer key
+python -m pipeline.cli retrieve "оплата за электроэнергию" --acc ACC-7801   # what RAG serves
+python -m pipeline.cli definitions                # what the contracts define each category to mean
 ```
 The classifier has two layers: a **deterministic** keyword/related-party layer (free, always
 available, and the only thing running when the free tier 429s) and **Gemini** for ambiguous
@@ -215,6 +225,40 @@ it only bracket-checks thresholds. 13 of 36 cells were computing the wrong quant
 both harnesses read green. Only the metric-definition tests in `test_engine.py`, written
 against clause wording mined from the PDFs, pin this down. **When in doubt, read the clause.**
 
+## Retrieval (RAG): what the model is allowed to read
+For most of this project nothing retrieved anything. Documents were routed whole by regex,
+clauses sliced by regex, and the classifier prompt carried a category list *we* wrote — judged
+against Kazakh payment narrations, with the borrower's contract sitting unread on disk. The
+sentence «Коммунальные расходы означают расходы на электроэнергию, водоснабжение» was in the
+corpus the whole time.
+
+`retrieval.py` indexes **1,309 passages from 189 documents** with BM25 (stdlib only) and the
+classifier's LLM prompt now carries the top passages from *that borrower's* contract and audit
+report, each attributed to its source filename so a surprising category can be traced to the
+passage that caused it.
+
+Three properties are load-bearing, and each is a test rather than an intention:
+
+- **The spec and answer key are never indexed.** Both name ACC-7801 in a worked example, so any
+  account-based router serves the answer key back as "context" and every number downstream
+  becomes self-fulfilling. So are the superseded 2024 contracts.
+- **Retrieval is scoped to one borrower.** Unscoped is worse than none: another borrower's
+  clause reads as authoritative and names a different threshold.
+- **Morphology is folded in on both sides.** The recurring bug in this repo is inflection
+  (`оплатУ труда` vs `оплат труда`); a retriever indexing surface forms inherits it at corpus
+  scale. Writing `test_retrieval` found two live instances: Kazakh two-letter suffixes were
+  eating Russian words (`оплате` → `опла` via KZ `те`, so the two inflections of one word
+  stopped sharing a stem), and `-ых/-их` was missing from the Russian table entirely.
+
+**Definition mining is deliberately NOT in the decision path.** `cli definitions` extracts every
+sentence where a contract defines a category, but measured against the 149 held-out narrations
+the mined terms fire on **1 of the 35 rows** the keyword table cannot decide — and get it wrong
+(«услуги по подбору ПЕРСОНАЛА» is a recruitment fee, which the table routes to opex on purpose).
+The reason is a property of this corpus: these contracts define categories *procedurally*
+(«суммы, отнесённые к данной статье в аудированной отчётности»), not by membership. It ships as
+a reading tool for event day, when the contracts are new and may not, with a test that fails if
+anyone autowires it without re-measuring.
+
 ## Gemini notes
 - Key authenticates as a query-param key. `gemini-2.5-*` is gated on it; use the `-latest`
   aliases. Workhorse is **`gemini-flash-lite-latest`** (highest free limits, ideal for
@@ -227,8 +271,11 @@ against clause wording mined from the PDFs, pin this down. **When in doubt, read
   fallback (indicative — the fixture is hand-built; recalibrate on the real ledger).
 
 ## Event-day checklist (when the real ledger arrives)
-0. **Set `solve.TEAM`** — it ships as the spec's placeholder `your-team-name`.
-1. Confirm `SCENARIO_TO_ACC` via `txn_id` prefix ↔ `account_id` in the ledger.
+The full runbook is `HANDOFF.md` §5; to swap the LLM, see `MODELS.md`.
+0. `solve.TEAM` is set (`darkhan`, `adarhan76@gmail.com`) — verify, don't re-set.
+1. Confirm `SCENARIO_TO_ACC` via `txn_id` prefix ↔ `account_id` in the ledger. The borrower
+   set comes from the ledger (`ledger.discover_scenario_map`), not from the constant, so a
+   13th borrower works without a code change — but check the count printed.
 2. `python -m pipeline.cli solve --ledger master_ledger_2025.csv` (add `--fx` if provided).
    Read the ingestion report it prints *before* trusting the cells: rows loaded, currencies,
    `scenarios resolved / 12`, and any `!!` line. `!!` means a whole class of cells is wrong.
