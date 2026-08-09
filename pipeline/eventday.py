@@ -103,6 +103,32 @@ def adopt_ledger_map(rep: Report, ledger: str | None) -> None:
         rep.ok(f"ledger names {len(found)} borrowers, matching the template exactly")
 
 
+def _related_party_cells_at_risk(dm: dict, empty: set[str]) -> list[str]:
+    """Cells whose covenant bounds related-party payments while the borrower's list is empty."""
+    try:
+        from . import covenants, engine
+        specs = covenants.build(use_llm=False, save=False)
+    except Exception:
+        return []
+    out = []
+    for sc, cids in (config.submission_template() or {}).items():
+        if config.SCENARIO_TO_ACC.get(sc) not in empty:
+            continue
+        for cid in cids:
+            spec = specs.get(sc, {}).get("covenants", {}).get(cid)
+            if not spec:
+                continue
+            try:
+                cats = set(engine.spec_categories(spec) or [])
+                rf = engine.ratio_formula(spec) or {}
+                cats |= {c for _, c in list(rf.get("num", [])) + list(rf.get("den", []))}
+            except Exception:
+                continue
+            if "related_party" in cats:
+                out.append(f"{sc} {cid}")
+    return out
+
+
 def preflight(rep: Report) -> dict:
     print("\n" + "=" * 78)
     print("1. PREFLIGHT — did the documents actually load?")
@@ -146,10 +172,17 @@ def preflight(rep: Report) -> dict:
     quarantined = sum(1 for d in dm["docs"].values() if d["outdated"] and d["has_covenants"])
     rep.ok(f"{quarantined} outdated contract(s) quarantined (the version trap)")
 
+    # Count the CELLS this actually costs, not the borrowers. Most borrowers with an empty
+    # related-party list have no related-party covenant, so listing all of them buries the one
+    # cell that is genuinely at risk under a screen of names that do not matter.
     no_rp = [a for a in borrowers if not reclass.related_parties(a, dm)]
-    if no_rp:
-        rep.warn(f"{len(no_rp)}/{len(borrowers)} borrower(s) with no related-party list: "
-                 f"{sorted(no_rp)} — any related-party cell of theirs reports $0")
+    at_risk = _related_party_cells_at_risk(dm, set(no_rp))
+    if at_risk:
+        rep.warn(f"{len(at_risk)} cell(s) bound related-party payments but their borrower has "
+                 f"an empty list, so they report $0: {at_risk}")
+    elif no_rp:
+        rep.ok(f"{len(no_rp)} borrower(s) have no related-party list, but none of their "
+               f"covenants bound related-party payments — no cell is affected")
     else:
         rep.ok(f"related parties resolve for all {len(borrowers)} borrowers")
 

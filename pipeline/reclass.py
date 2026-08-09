@@ -288,6 +288,45 @@ def ebitda_addback(acc: str) -> float:
     return sum(v for v in (e.get("one_off_items_usd") or {}).values() if v >= floor)
 
 
+# The real archive's dossiers do not always carry an ownership TABLE. Many state the
+# conclusion outright, one record per counterparty:
+#
+#   «Запись 1. Контрагент «Taraz Digital Ventures LLP» классифицирован как АФФИЛИРОВАННОЕ
+#    ЛИЦО Заёмщика. … Платежи данному контрагенту признаются Ограниченными платежами для
+#    целей ковенантов.»
+#
+# That is the same determination the ownership test exists to reach, already made by the
+# compliance function — so it is read directly. The same record format also declares
+# subsidiaries as ОГРАНИЧЕННАЯ (restricted, inside the collateral perimeter) or
+# НЕОГРАНИЧЕННАЯ (unrestricted, outside it), and only the latter feeds the
+# transfers-to-unrestricted-subsidiaries covenant. Reading "ДОЧЕРНЯЯ ОРГАНИЗАЦИЯ" as
+# related-party would sweep in restricted subsidiaries the covenant deliberately excludes.
+_DECLARED_RE = re.compile(
+    r"Контрагент\s*«([^»]{3,70})»\s*(?:классифицирован\w*\s+как|призна\w+)\s+"
+    r"(АФФИЛИРОВАННОЕ\s+ЛИЦО|СВЯЗАННОЙ\s+СТОРОНОЙ)", re.I)
+_DECLARED_NOT_RE = re.compile(
+    r"Контрагент\s*«([^»]{3,70})»\s*(?:НЕ\s+(?:классифицирован\w*|призна\w+)|"
+    r"не\s+является\s+связанн)", re.I)
+
+
+def declared_related_parties(acc: str, dm: dict | None = None) -> set[str]:
+    """Counterparties a dossier declares affiliated in so many words."""
+    dm = dm or docmap.build(save=False)
+    groups = dm["by_acc"].get(acc, {})
+    docs = groups.get("kyc", []) + groups.get("audits", []) + groups.get("other", [])
+    yes: set[str] = set()
+    no: set[str] = set()
+    for name in docs:
+        try:
+            text = pdftext.extract_text(config.dataset_path(name))
+        except Exception:
+            continue
+        yes |= {_clean_name(m.group(1)) for m in _DECLARED_RE.finditer(text)}
+        no |= {_clean_name(m.group(1)) for m in _DECLARED_NOT_RE.finditer(text)}
+    # An explicit denial always wins: these dossiers are seeded with near-miss decoys.
+    return {n for n in yes if n and n not in no}
+
+
 def related_parties(acc: str, dm: dict | None = None) -> set[str]:
     """Counterparties that qualify as related parties for this borrower.
 
@@ -321,6 +360,9 @@ def related_parties(acc: str, dm: dict | None = None) -> set[str]:
     # ACC-7802's ownership section and ACC-7806's whole dossier are IMAGES; the text layer
     # yields nothing, so without this both report zero related-party spend and a confident
     # COMPLIANT on cells the key marks BREACH.
+    # An ownership table is the strongest signal, but the real archive's dossiers often state
+    # the conclusion instead of the arithmetic. Union both, then fall back to the images.
+    parties |= declared_related_parties(acc, dm)
     return parties or _related_from_image(acc)
 
 
