@@ -371,7 +371,20 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
     if TEAM == "your-team-name":
         print("!! solve.TEAM is still the spec's placeholder 'your-team-name' — "
               "set it before submitting.")
-    submission = {"team": TEAM, "contact_email": CONTACT, "model": MODEL, "answers": answers}
+    # Emit the scenarios in the TEMPLATE's order. The spec asks for a file «точно по образцу
+    # submission_template.json», and while JSON object order is not semantic, a file whose
+    # borrowers appear in dict-insertion order is needlessly hard to diff against the template
+    # by eye — which is how a missing or extra cell gets spotted.
+    order = list(config.submission_template())
+    if order:
+        answers = {sc: answers[sc] for sc in order if sc in answers} | \
+                  {sc: v for sc, v in answers.items() if sc not in order}
+
+    # Name the model that actually did the work. On the keyword path NO model ran, and writing
+    # a model id there claims a provenance the file does not have — the same reproducibility
+    # failure MODELS.md warns about, just pointing the other way.
+    used = MODEL if classifier_mode in ("gemini", "hybrid") else "none (deterministic keyword classifier)"
+    submission = {"team": TEAM, "contact_email": CONTACT, "model": used, "answers": answers}
     if write:
         (config.ROOT / "submission.json").write_text(
             json.dumps(submission, ensure_ascii=False, indent=2), encoding="utf-8")
