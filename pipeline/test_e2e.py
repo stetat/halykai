@@ -60,6 +60,20 @@ INFLOW = {"revenue", "financing"}
 _NAME_RE = re.compile("|".join(sorted(CATEGORIES, key=len, reverse=True)))
 
 
+# EBITDA is not a category any transaction can carry, so a formula naming it used to be
+# unreachable and P3 6.1 / P7 6.1 went unexercised. But it is not an unknown either: the
+# INDEPENDENT reading says so itself, in both of those cells — «EBITDA is NOT defined anywhere
+# in this contract; sibling contracts P5 and B1 define it as «Выручка за вычетом Операционных
+# расходов», so revenue - opex is the natural fill-in» — and writes exactly that expansion out
+# by hand for P4 6.1 and P5 6.1. Substituting it here therefore stays inside the independent
+# reading; it does not borrow the engine's definition, which is what would make this circular.
+_EBITDA_EXPANSION = "(revenue - opex)"
+
+
+def expand_ebitda(formula: str) -> str:
+    return re.sub(r"\bebitda\b", _EBITDA_EXPANSION, formula)
+
+
 def evaluate_formula(formula: str, totals: dict[str, float]) -> float | None:
     """Evaluate an independent formula over category totals. Names are restricted to
     CATEGORIES, so this cannot execute anything the semantics file did not intend."""
@@ -94,35 +108,113 @@ def build_totals(formula: str, target: float, is_ratio: bool) -> dict[str, float
     # sits on both sides of the division, so the function is non-monotonic in it and bisection
     # cannot converge; opex appears once and the formula falls cleanly in it.
     once = [c for c in names if len(re.findall(rf"\b{c}\b", formula)) == 1]
-    free = once[0] if once else names[0]
+    # WHICH of them is free decides whether a construction exists at all, not merely how tidy
+    # it is. For «(tax + utilities) / (revenue - opex)» at 0.36x, solving for `tax` requires the
+    # numerator to come out below the pinned utilities figure, i.e. negative, at every scale —
+    # shrinking everything uniformly cannot fix a sign. Solving for `revenue` instead lands
+    # every category positive. So try each candidate rather than taking the first.
+    candidates = once + [c for c in names if c not in once]
     # Pin the others low enough that max() resolves to the free variable and denominators stay
     # non-zero. For ratios the pinned side is the denominator, so it needs a real magnitude.
     base = 1_000_000.0 if is_ratio else max(abs(target) * 0.25, 1_000.0)
-    totals = {c: base * (1.0 + i * 0.37) for i, c in enumerate(names) if c != free}
 
-    def f(x: float) -> float | None:
-        return evaluate_formula(formula, {**totals, free: x})
+    # A construction is only usable if EVERY category comes out a quantity a real ledger could
+    # carry. Pin the other numerator terms too high and the only way to hit a small target ratio
+    # is a NEGATIVE free variable; `totals_to_txns` then takes abs() and materialises a positive
+    # expense, so the ledger stops satisfying the formula it was built from and the cell reports
+    # a disagreement belonging to this harness rather than to the engine. P7 6.1 did exactly
+    # that: utilities pinned at 1.37M against an EBITDA of 1.04M forced tax to -994,160 for a
+    # 0.36x target, and the cell read 2.26 against the key's 0.36.
+    for free in candidates:
+        for shrink in (1.0, 0.25, 0.05, 0.01):
+            pinned = {c: base * shrink * (1.0 + i * 0.37)
+                      for i, c in enumerate(names) if c != free}
+            # Once `ebitda` expands to (revenue - opex), the spread above can pin opex ABOVE
+            # revenue — whichever appears later gets the larger value — and a negative EBITDA
+            # runs the ratio backwards. Whenever both are pinned, keep the borrower profitable;
+            # the magnitudes are arbitrary, only their order matters.
+            if "revenue" in pinned and "opex" in pinned:
+                pinned["opex"] = pinned["revenue"] * 0.4
 
-    lo, hi = -1e13, 1e13
-    f_lo, f_hi = f(lo), f(hi)
-    if f_lo is None or f_hi is None:
-        return None
-    if f_lo > f_hi:                       # decreasing in the free variable (a denominator)
-        lo, hi = hi, lo
-    for _ in range(300):
-        mid = (lo + hi) / 2
-        got = f(mid)
-        if got is None:
-            return None
-        if got < target:
-            lo = mid
-        else:
-            hi = mid
-    totals[free] = (lo + hi) / 2
-    got = evaluate_formula(formula, totals)
-    if got is None or abs(got - target) > max(abs(target) * 1e-6, 1e-6):
-        return None                                   # could not construct — reported, not hidden
-    return totals
+            def f(x: float, _p=pinned) -> float | None:
+                return evaluate_formula(formula, {**_p, free: x})
+
+            # A ratio is a HYPERBOLA in its denominator: «(tax+utilities)/(revenue-opex)» has a
+            # pole at revenue == opex, so the function is not monotonic across a wide bracket
+            # and a global bisection walks straight through the discontinuity and converges on
+            # nothing. Scan a coarse grid first, take the first adjacent pair that straddles the
+            # target, and bisect only inside that interval — where the function IS monotonic.
+            # Only x >= 0 is scanned, since a negative category total is rejected anyway.
+            grid = [0.0] + [10.0 ** (e / 8.0) for e in range(8, 8 * 14)]
+            brackets = []
+            prev_x, prev_y = None, None
+            for x in grid:
+                y = f(x)
+                if y is None:
+                    prev_x, prev_y = None, None
+                    continue
+                if prev_y is not None and (prev_y - target) * (y - target) <= 0:
+                    brackets.append((prev_x, x))
+                prev_x, prev_y = x, y
+
+            # EVERY straddle is tried, not just the first. A hyperbola crosses the target twice
+            # over a wide scan: once at the genuine root and once at the POLE, where the value
+            # leaps from large-negative to large-positive without ever equalling the target. The
+            # pole interval usually comes first, so taking the first straddle finds nothing and
+            # the cell reports "could not construct" for a formula that is perfectly solvable.
+            for lo, hi in brackets:
+                y_lo, y_hi = f(lo), f(hi)
+                if y_lo is None or y_hi is None:
+                    continue
+                if y_lo > y_hi:                  # decreasing across this interval
+                    lo, hi = hi, lo
+                diverged = False
+                for _ in range(200):
+                    mid = (lo + hi) / 2
+                    got = f(mid)
+                    if got is None:
+                        diverged = True
+                        break
+                    if got < target:
+                        lo = mid
+                    else:
+                        hi = mid
+                if diverged:
+                    continue
+                solved = dict(pinned)
+                solved[free] = (lo + hi) / 2
+                got = evaluate_formula(formula, solved)
+                if got is None or abs(got - target) > max(abs(target) * 1e-6, 1e-6):
+                    continue                     # this straddle was a pole, not a root
+                if any(v < 0 for v in solved.values()):
+                    continue                     # a negative category total
+                return solved
+    return None                                       # could not construct — reported, not hidden
+
+
+def scale_past_springing_trigger(totals: dict[str, float],
+                                 trigger: float | None) -> dict[str, float]:
+    """Scale a RATIO construction up until it actually activates a springing covenant.
+
+    P3 6.1 only applies «ТОЛЬКО ПРИ УСЛОВИИ, что совокупные поступления по финансированию
+    превышают $4,000,000.00». The bisection has no reason to land above that — it solved for a
+    ratio of 1.71 at a financing figure of $1.4M — so the engine correctly declined to spring
+    and returned COMPLIANT against the key's BREACH. That read as a metric disagreement and was
+    nothing of the kind: the harness had built a borrower the covenant does not apply to.
+
+    Every total is scaled by one factor, which leaves the ratio (and therefore `actual`)
+    untouched. Scaling ALL of them past the trigger, rather than the one term the engine says
+    triggers, keeps the harness from having to ask the engine which term that is."""
+    if not trigger:
+        return totals
+    biggest = max((abs(v) for v in totals.values()), default=0.0)
+    smallest = min((abs(v) for v in totals.values() if v), default=0.0)
+    if not smallest or smallest > trigger:
+        return totals
+    factor = (trigger * 1.5) / smallest
+    if factor * biggest > 1e15:            # refuse to build a ledger of absurd magnitude
+        return totals
+    return {c: v * factor for c, v in totals.items()}
 
 
 def totals_to_txns(sc: str, totals: dict[str, float],
@@ -182,6 +274,7 @@ def main() -> None:
             if not formula or target is None or not spec:
                 skipped.append((sc, cid, "no independent formula" if not formula else "no spec"))
                 continue
+            formula = expand_ebitda(formula)
             # EBITDA is derived inside the engine, not a category a transaction can carry, so a
             # formula naming it cannot be materialised as a ledger. Skipped and reported rather
             # than silently approximated into something that would pass for the wrong reason.
@@ -218,11 +311,14 @@ def main() -> None:
                 skipped.append((sc, cid, f"key actual {target} is within its own rounding of "
                                          f"the {thr} threshold — verdict not reconstructible"))
                 continue
-            totals = build_totals(formula, float(target),
-                                  is_ratio=(spec.get("unit") == "ratio"))
+            is_ratio = spec.get("unit") == "ratio"
+            totals = build_totals(formula, float(target), is_ratio=is_ratio)
             if totals is None:
                 skipped.append((sc, cid, f"could not construct a ledger for {formula!r}"))
                 continue
+            if is_ratio:
+                totals = scale_past_springing_trigger(totals,
+                                                      spec.get("springing_trigger_usd"))
             catf = Categorizer(base_classifier, rcs, related_parties=rps,
                                unrestricted_parties=reclass.unrestricted_subsidiaries(acc),
                                excluded_txns=excluded)
