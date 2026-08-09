@@ -2,9 +2,9 @@
 cache/
 __pycache__/
 *.pyc
-submission.json
 covenant_specs.json
 docmap.json
 dataset/real/
-submission_keyword.json
-submission_hybrid.json
+
+# submission.json IS the deliverable and is tracked on purpose, together with the two
+# variants it is chosen from — they are the evidence behind that choice.

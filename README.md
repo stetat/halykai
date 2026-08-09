@@ -1,291 +1,221 @@
-# Halyk AI Challenge — pipeline
+# Halyk AI Challenge — covenant compliance pipeline
 
-Agent that reads the (deliberately obfuscated) financial PDFs + transaction ledger and
-decides, per borrower × covenant (clauses 6.1/6.2/6.3), `status` / `actual` / `evidence_txn_id`.
+An agent that reads 306 deliberately obfuscated financial PDFs plus a 2,355-row transaction
+ledger and decides, for every borrower × covenant clause: `status`, `actual`, `evidence_txn_id`.
 
-## What the dataset really is
-Filenames and extensions are misdirection. Verified:
-- `master_ledger_2025.csv` is a **4-byte stub**; `ground_truth.json` is a **PDF trap**;
-  `submission_template.json` is **pre-filled = the answer key** for this practice release.
-- 200 real PDFs → **12 borrowers** (`ACC-7201,7204,7801–7810`) ↔ 12 scenarios (`B1,B4,P1–P10`).
-  The mapping is **stated outright** in the Russian spec (`028324997d3c.pdf`, a `.pdf` that
-  is really markdown): `txn_id = TXN-P1-0039` → scenario `P1`, `account_id = ACC-7801`.
-- The spec and answer key are **not borrower documents**, but both name `ACC-7801` in that
-  example, so routing by ACC id alone files the specification under ACC-7801's audit reports
-  and its example transaction surfaces as one of P1's reclassifications. `docmap.SPEC_RE`
-  excludes them.
-- **No other hidden channel exists**: swept all PDFs for annotations, embedded files,
-  AcroForm fields, optional-content layers, JavaScript, XMP and `/Info` metadata — all
-  clean. Images are the only out-of-band carrier.
-- Every borrower has an **outdated 2024 contract** ("НЕДЕЙСТВУЮЩАЯ … НЕ ПРИМЕНЯЕТСЯ") and a
-  **live 2025 contract**. Use only the live one. There are also **interim/draft** audit
-  worksheets ("ПРОМЕЖУТОЧНАЯ … предварительн") that rank below the final audit report.
-- `pdftotext -raw -enc UTF-8` recovers the Cyrillic (`-layout` does not).
+---
 
-## The practice release cannot be fully "solved"
-The real ledger + FX table are withheld: **exact `actual`s and 7/9 `evidence_txn_id`s are not
-computable from these files.** This release exists to build & validate the *document-reading*
-half (done: see below) and to build + unit-test the *compute engine* so it's correct the moment
-the real ledger ships on event day.
+# ➜ `submission.json` is the deliverable
+
+**[`submission.json`](submission.json) at the repo root is the file to submit.** Everything
+else in this repository exists to produce and justify it.
+
+| | |
+|---|---|
+| **cells** | 84/84 — all 27 borrowers, every clause the template asks for |
+| **valid** | every cell a `COMPLIANT`/`BREACH` and a numeric `actual`; none blank |
+| **verdicts** | 6 BREACH, 78 COMPLIANT, 2 evidence transactions |
+| **produced by** | the deterministic keyword classifier — **no LLM**, byte-for-byte reproducible |
+| **order** | matches `submission_template.json` exactly |
+
+Two other files sit beside it as the evidence behind that choice:
+
+- `submission_keyword.json` — the deterministic baseline (identical to what ships)
+- `submission_hybrid.json` — the same run with Gemini on undecided rows (14 BREACH, 11 evidence)
+
+They differ on **32 of 84 cells**. Which one ships and why is in [`REPRODUCE.md` §7](REPRODUCE.md).
+
+---
+
+## Reproducing `submission.json`
+
+### Requirements
+
+- **Python 3.9+** — the pipeline is **stdlib only**. No `pip install`, nothing to pin.
+- **`pdftotext`** (from poppler) — the single external binary. `brew install poppler`.
+- A Gemini API key in `.env` — **only if** you want the hybrid run. The shipped file needs none.
+
+### The one command
+
+```bash
+cd <repo root>
+export DATASET_DIR="dataset/real/agentic-bank-hidden"     # ← REQUIRED
+
+python -m pipeline.cli eventday \
+    --ledger dataset/real/agentic-bank-hidden/master_ledger_2025.csv
+```
+
+That runs the whole flow — preflight → keyword baseline → hybrid → diff → validate — and ends
+on **GO** or **NO-GO**. It writes `submission.json`, and keeps both variants next to it.
+
+To reproduce the shipped file exactly, with no API calls at all:
+
+```bash
+DATASET_DIR=dataset/real/agentic-bank-hidden python -m pipeline.cli eventday \
+    --ledger dataset/real/agentic-bank-hidden/master_ledger_2025.csv --no-llm
+```
+
+> ### `DATASET_DIR` is not optional
+> Unset, the pipeline reads the **practice release** in `dataset/` — 12 borrowers, 36 cells —
+> and writes a perfectly valid submission for the wrong contest, with no error. If a run looks
+> strange, check this first.
+
+### What a correct run prints
+
+```
+  ok   ledger names 27 borrowers, matching the template exactly
+  ok   310 dataset files found (nested under ['documents'])
+  ok   310 documents classified; all 27 borrowers have documents
+  ok   live contract selected for all 27 borrowers
+  ok   27 outdated contract(s) quarantined (the version trap)
+  WARN 1 cell(s) bound related-party payments but their borrower has an empty list …
+  WARN 10 image document(s) nobody has transcribed …
+FX: 7 rate disclosure(s) read from documents; 7 borrower(s) covered directly.
+Ledger: 2355 rows, 2 currencies, 27 scenarios resolved / 27
+  ok   keyword: 84/84 cells computed -> submission_keyword.json
+  ok   all 84 cells have a valid status and a numeric actual
+GO, with 2 thing(s) to read first
+```
+
+Any `FAIL` means a whole class of cells is wrong and no later number is worth reading. The two
+`WARN`s above are known and documented, not regressions.
+
+### Proving the run is deterministic
+
+```bash
+DATASET_DIR=dataset/real/agentic-bank-hidden python -m pipeline.cli eventday \
+    --ledger dataset/real/agentic-bank-hidden/master_ledger_2025.csv --no-llm
+cp submission.json /tmp/a.json
+DATASET_DIR=dataset/real/agentic-bank-hidden python -m pipeline.cli eventday \
+    --ledger dataset/real/agentic-bank-hidden/master_ledger_2025.csv --no-llm
+diff /tmp/a.json submission.json && echo IDENTICAL
+```
+
+Full conditions for reproducibility — and what to check when a number moves — are in
+[`REPRODUCE.md`](REPRODUCE.md).
+
+### Verifying the pipeline itself
+
+Free, offline, no quota. All nine must pass:
+
+```bash
+python -m pipeline.test_engine       # metric definitions vs real clause wording
+python -m pipeline.test_ledger       # 8 CSV dialects, FX, number parsing
+python -m pipeline.test_classifier   # vocabulary, related-party matching, sign guard
+python -m pipeline.test_retrieval    # index, borrower scoping, spec-leakage guard
+python -m pipeline.test_docs         # real PDFs vs ground truth, incl. nested archive
+python -m pipeline.test_eventday     # the shipping gate
+python -m pipeline.test_roundtrip    # 36/36 through a hostile cp1251/';'/KZT file
+python -m pipeline.test_e2e          # non-circular end-to-end vs the practice key
+python -m pipeline.test_holdout      # the two honest accuracy numbers
+```
+
+`python -m pipeline.cli scorecard` runs them all and prints one table, separating
+out-of-sample numbers from in-sample ones.
+
+---
+
+## Other commands
+
+```bash
+python -m pipeline.cli map                       # what got classified, and from where
+python -m pipeline.cli specs --no-llm            # covenant specs, regex only
+python -m pipeline.cli retrieve "<query>" --acc ACC-7001   # what the RAG layer serves
+python -m pipeline.cli definitions               # what each contract defines its categories to mean
+python -m pipeline.cli ocr                       # transcribe images nobody has read (uses quota)
+python -m pipeline.fx                            # every FX rate found, with its source document
+python -m pipeline.cli score submission.json     # score vs a key, where one exists
+```
+
+`--classifier` selects how much the LLM sees: `keyword` (default, free, offline), `hybrid`
+(1 call/borrower, only rows no rule decided), `gemini` (every row). See [`MODELS.md`](MODELS.md)
+to run any of it on a different model.
+
+---
+
+## What the real archive is
+
+Established by inspection, not assumed — each of these broke something before it was handled:
+
+- **310 files**, documents nested inside `documents/`.
+- **27 borrowers, 84 cells.** 24 × {6.1, 6.2, 6.3}, plus **X1/X2/X3 with a 6.4**, plus **J4
+  numbered 5.1/5.2/5.3**. A hardcoded triple both invents and omits cells.
+- **The template is blank** — no answer key ships, so accuracy is not measurable on this data.
+- **Scenario ids are `S1 B2 F1 G1 H1 J1 KC X1 …`**, read from the ledger by majority vote and
+  constrained to the template's list.
+- **`KC` sits on account `TELE-4471`**, not `ACC-####`, and numbers its rows `TXN-KC-CAP-29` —
+  three segments where every other borrower uses two.
+- **800 of 2,355 rows are counterparty noise** on ~550 `ACC-9xxx` accounts; only 1,555 are
+  borrower rows.
+- **J4's documents are entirely in English** — Dutch auditor, `CREDIT AGREEMENT`, `Section 5.1`,
+  `SUPERSEDED … NOT OPERATIVE`. Every Russian-only pattern missed it.
+- **No FX file ships**, and 25 of 27 borrowers hold EUR. See below.
+- **The transaction ledger is data, not a document.** It names every account, so routing it by
+  account id filed a 310 KB CSV under all 27 borrowers — and `reclass` then found six
+  *fabricated* reclassifications inside the ledger's own rows.
+
+## The traps that decide cells
+
+**The version trap.** Every borrower has an outdated prior-year contract stamped
+«НЕДЕЙСТВУЮЩАЯ … НЕ ПРИМЕНЯЕТСЯ» (or `SUPERSEDED … NOT OPERATIVE`) alongside the live one.
+Using the wrong one poisons every number for that borrower. 27/27 quarantined.
+
+**Related parties are an ownership test, not a name match.** The contracts are explicit:
+*«Отнесение контрагента к аффилированным лицам определяется … **а не назначением платежа**»*.
+Dossiers state membership either as an ownership table with a per-borrower threshold, or
+declaratively («классифицирован как АФФИЛИРОВАННОЕ ЛИЦО»), and are seeded with near-miss decoys
+and a footnote trap where a 48% stake is really 27.3% of voting rights.
+
+**FX rates are in the documents, and differ per borrower.** No `--fx` file ships. Two borrowers
+state a rate outright («1 EUR = $1.08»); five more imply it through a worked example — and those
+quote the payment **net of a bank fee** explicitly excluded from the converted amount. Adding
+the fee back turns 1.1029 into exactly 1.1200 and 1.0764 into 1.0850: every disclosed rate is
+round once restored, none are without it. See [`pipeline/fx.py`](pipeline/fx.py).
+
+**Covenant data hidden inside images.** `pdftotext` returns nothing for an image, so a document
+whose ownership table lives in a picture reads as ordinary and the determination is silently
+dropped. `pipeline/pdfimages.py` extracts them (stdlib only); `cli ocr` transcribes them with
+model vision, and hand-verified values in `image_facts.json` always win. **10 image documents in
+the real archive are still untranscribed** — the largest open lead.
+
+---
 
 ## Layout
+
 ```
 pipeline/
-  config.py       paths, .env loader, scenario<->account map
+  config.py       paths, .env, dataset discovery, scenario<->account map, template reader
   pdftext.py      magic-byte typing + cached `pdftotext -raw` extraction
-  docmap.py       classify all files, quarantine outdated contracts, pick current one
-  retrieval.py    BM25 passage index over the corpus (RU/KZ morphology folded in), scoped
-                  by borrower — grounds the classifier prompt in that borrower's own
-                  contract. Never indexes the spec/answer key or the 2024 contracts.
-  covenants.py    Stage A: current contract -> covenant spec. Thresholds/operators are
-                  parsed DETERMINISTICALLY (regex, exact, free); Gemini only enriches.
-  reclass.py      auditor reclassifications (applied vs the rejected-trap) + related parties
-  classifier.py   Gemini transaction categoriser: batched 1 call/borrower, cached, with a
-                  deterministic related-party override + keyword fallback
-  ledger.py       event-day ledger loader: sniffs encoding+delimiter, fuzzy RU/EN headers,
-                  dual scenario resolution (txn_id prefix, then account_id), FX table
-  engine.py       Stage B: spec + ledger -> status/actual/evidence (leave-one-out evidence)
-  gemini.py       stdlib REST client: dual auth, disk cache, throttle, backoff
-  scorer.py       exact CASE.ru.md rubric
-  validate.py     bracket-check extraction vs the answer key (no API)
+  docmap.py       classify every file, quarantine outdated contracts, pick the current one
+  retrieval.py    BM25 passage index (RU/KZ morphology folded in), scoped per borrower;
+                  grounds the classifier prompt in that borrower's own contract
+  covenants.py    contract -> covenant spec. Thresholds/operators parsed DETERMINISTICALLY
+  reclass.py      auditor reclassifications, related parties, period cut-offs
+  fx.py           per-borrower FX rates read out of the documents
+  classifier.py   transaction categoriser: keyword table first, LLM only on undecided rows
+  ledger.py       ledger loader: sniffs encoding/delimiter, fuzzy RU/EN headers, FX
+  engine.py       spec + ledger -> status/actual/evidence (leave-one-out evidence)
+  eventday.py     the one command: preflight -> baseline -> hybrid -> diff -> validate
+  scorecard.py    every measurable number in one table
   solve.py        end-to-end -> submission.json
-  test_engine.py  synthetic-ledger correctness tests for the engine
-  test_ledger.py  dialect torture-test: the same ledger in 8 plausible formats
-  test_roundtrip.py  the 36/36 forced through a hostile file (cp1251/';'/Cyrillic/KZT+FX)
-  pdfimages.py    stdlib PDF image extraction — the dataset hides tables in images
-  make_ledger.py  writes a realistic multi-borrower ledger CSV, then runs the real
-                  CLI against it — the only whole-program dress rehearsal
-  test_docs.py    document reading vs REAL ground truth (evidence ids, KYC thresholds)
   cli.py          entry point
 ```
 
-## Related parties are an ownership test, not a name match
-The contracts are explicit: *"Отнесение контрагента к аффилированным лицам определяется …
-**а не назначением платежа**"*. Each KYC dossier carries an ownership table and a threshold
-that **differs per borrower** (seen: 20%–38%):
+Docs: [`REPRODUCE.md`](REPRODUCE.md) (reproducibility + the ship decision) ·
+[`MODELS.md`](MODELS.md) (running on a different model) ·
+[`HANDOFF.md`](HANDOFF.md) (what is measured, what is left, and every trap found).
 
-> Организации, в которых Группа владеет **36.0% и более** голосующих прав, признаются
-> связанными сторонами для целей Договора.
+## Honest numbers
 
-Only holders at or above that bar qualify. The dossiers are seeded with near-miss decoys
-(`Saryarka Terminal Properties LLP` at 33.5% against a 36.0% bar) and one **footnote trap**:
-a stake shown as 48.0% in the table is held indirectly, with the Group's real voting rights
-disclosed further down as 27.3% — below that dossier's 30.0% bar, so it does **not** qualify.
-Previously `related_parties()` returned every company name in the file, which inflates all
-12 related-party cells. All 12 borrowers now resolve — but **two of them only via images**
-(see below).
+Measured on the **practice release**, which ships a filled answer key. The real archive's
+template is blank, so nothing can be scored against it — these are what the pipeline is worth,
+not what this submission scored:
 
-## The deepest trap: covenant data hidden inside IMAGES
-`pdftotext` returns nothing for an image, so a text-only pipeline reads these documents as
-ordinary and **silently drops the determination**. Four documents do this, and each one
-changes an answer:
+| measure | value |
+|---|---|
+| transaction classifier, first-contact on held-out narrations | **113/149 = 75.8%** |
+| metric rules corroborated by ≥2 borrowers | **33/36 = 91.7%** |
+| non-circular end-to-end vs the key | **31 cells exercised, 0 status disagreements** |
+| hostile-dialect ingestion round trip | 36.000/36, evidence 9/9 |
 
-| document | account | what only the image says |
-|---|---|---|
-| `f5e315b390df.pdf` | ACC-7806 (P6) | the **entire KYC dossier**, scanned — no text layer at all |
-| `6686c0493014.pdf` | ACC-7802 (P2) | the ownership section of an otherwise-text dossier |
-| `2fe3878667db.pdf` | ACC-7804 (P4) | one-off items **added back to EBITDA**, with a $300k floor |
-| `abe2474bd443.pdf` | ACC-7809 (P9) | which subsidiaries are **unrestricted** (<50% pledged) |
-
-`python -m pipeline.pdfimages` finds every PDF carrying a sizeable image and writes them to
-`cache/images/` as PNGs — stdlib only, no poppler or Pillow (the streams are FlateDecode
-with a PNG predictor, so the inflated bytes are already PNG's IDAT payload). The values
-read off those PNGs live in **`image_facts.json`**, each with its source document so it can
-be re-checked. They are used only where the text layer yields nothing for that account.
-
-Each image carries the same **threshold + near-miss decoy** structure as the text dossiers:
-P2's bar is 25.0% with a 23.4% decoy; P6's is 40.0% with a 38.1% decoy; P4's add-back floor
-is $300k with a $251k item that must **not** be added; P9's pledge bar is 50.0%.
-
-**Event day:** re-run `python -m pipeline.pdfimages`, then `python -m pipeline.cli ocr` reads
-any image nobody has transcribed using the model's vision, into `cache/image_facts_ocr.json`.
-Hand-verified entries in `image_facts.json` always win — a transcription checked against the
-picture beats one that was not — so OCR output never overwrites a verified fact in place.
-`pdfimages.untranscribed_image_docs()` detects a new image document and `solve` shouts about it.
-The vision OCR is validated against all 3 hand-verified documents: every threshold and amount
-exact.
-
-## Event-day ingestion hardening
-The case states the ledger is **one file for all borrowers, multi-currency, expenses
-negative, no category column** — but not its encoding, delimiter, or header names. Those
-unknowns are the only way to score 0 on cells whose math is already proven, so the loader
-degrades instead of crashing:
-
-- **encoding** sniffed (utf-8/BOM/utf-16/cp1251/cp1252/koi8-r) — a cp1251 ledger used to
-  raise `UnicodeDecodeError` and produce no submission file at all;
-- **delimiter** sniffed (`,` `;` tab `|`) — RU Excel exports default to `;`;
-- **headers** matched on normalised RU+EN aliases, so `Сумма`, `Transaction ID`, and
-  `назначение_платежа` all resolve; a `debit`/`credit` pair substitutes for `amount`;
-- **scenario resolved from two independent keys** — `txn_id` prefix first, then
-  `account_id`. Previously an unexpected `txn_id` format sent every row to bucket `""`
-  and emitted **0/36 silently**;
-- **numbers**: NBSP thousands, RU decimal commas, parenthesised negatives, unicode minus,
-  trailing currency codes. Note `0,002` is a *rate*, not `2` — getting that wrong scales
-  every converted amount by 1000x (caught by `test_roundtrip`);
-- **FX** is real now (`--fx`), and auto-inverts "units per 1 USD" quoting. It was
-  previously a `TODO` that silently counted non-USD rows 1:1;
-- **fail-safe**: ledger/classifier/engine errors are caught per stage and per cell, so a
-  bad borrower costs its own cells and never the whole run, and `submission.json` is
-  always written. `solve` shouts about unmapped rows, empty scenarios, missing FX, and
-  any cell left empty.
-
-## Usage (run from project root; prefix `PYTHONUTF8=1` on Windows for console Cyrillic)
-```
-python -m pipeline.cli eventday --ledger L.csv --fx FX.csv   # THE event-day command:
-      # preflight -> keyword baseline -> hybrid -> diff -> validate -> GO/NO-GO
-      # --no-llm spends no quota; --ship hybrid ships the model result instead
-python -m pipeline.cli check                    # verify Gemini key (1 call)
-python -m pipeline.cli map                       # docmap.json + current-contract table
-python -m pipeline.cli validate                  # bracket-check vs answer key (no API)
-python -m pipeline.test_engine                    # engine correctness tests
-python -m pipeline.cli solve --ledger LEDGER.csv  # -> submission.json (keyword classifier)
-python -m pipeline.solve --ledger LEDGER.csv --classifier gemini   # Gemini categoriser
-python -m pipeline.cli score submission.json      # score vs answer key
-python -m pipeline.cli retrieve "оплата за электроэнергию" --acc ACC-7801   # what RAG serves
-python -m pipeline.cli definitions                # what the contracts define each category to mean
-```
-The classifier has two layers: a **deterministic** keyword/related-party layer (free, always
-available, and the only thing running when the free tier 429s) and **Gemini** for ambiguous
-rows. Because the free tier is small, treat the deterministic layer as the primary classifier
-and Gemini as the enrichment. Test it with:
-```
-python -m pipeline.test_classifier             # deterministic path only — free, no API calls
-python -m pipeline.test_classifier --gemini    # additionally spends quota on the LLM path
-```
-`solve.base_classifier` **is** `classifier.keyword_category` — one implementation, aliased,
-never copied. A stale copy previously lived in `solve.py` and had silently diverged: it could
-emit only 4 of the 13 categories, so every ratio covenant dividing by interest/tax/utilities/
-insurance/financing hit `den == 0` → `UNKNOWN` → empty cell → 0 points. It scored **23%** where
-the shared implementation scores **100%**. `test_classifier` now pins the alias and asserts every
-formula category is reachable offline, so the two paths cannot drift apart again.
-Free tier is **~20 requests/minute**. If you burn the minute, `classify_batch` catches the 429
-and falls back to keywords, and the harness prints `!! DEGRADED RUN` — so a rate-limited run
-is never mistaken for a real Gemini score. Re-run after ~60s for a clean Gemini number. The
-deterministic layer alone passes the current fixture; the real-data value of Gemini is rows the
-keywords don't cover, so recalibrate both against the actual ledger on event day.
-
-## Current results (this practice release)
-- Version trap beaten: **12/12** live contracts selected, **12/12** outdated quarantined.
-- Extraction validation: **34 bracket-OK, 0 MISMATCH, 2 n/a** (boundary-rounding) / 36 —
-  thresholds, operators, and borrower mapping are correct.
-- Engine: all correctness tests pass (ratio math, reclassification flips, rejected-trap,
-  aggregate → null evidence).
-- Reconstructed-ledger E2E (`python -m pipeline.reconstruct`): **all 36 cells** score
-  **36.000/36 = 1.0000** graded by the real scorer against the real key, with **9/9** evidence
-  transactions recovered via leave-one-out.
-- Scorer self-test = **1.0000**.
-- Deterministic classifier: **31/31 = 100%**, no API calls, with all 10 formula categories
-  reachable offline (was 23% before the stale-copy fix). 9 of the 31 rows are built from
-  vocabulary **mined out of the actual PDFs** — the contracts' own category labels and real
-  counterparty names — rather than invented by us; the other 22 are hand-written, so treat
-  this as a calibration signal, not a guarantee.
-- Engine metric-definition tests: **9/9**, each written against real mined clause wording.
-- Related-party lists resolve for **12/12** borrowers (2 only via `image_facts.json`).
-- Document ground-truth tests (`python -m pipeline.test_docs`): **all pass**. Evidence
-  transactions the documents actually name are recovered **2/2** as applied
-  reclassifications (was 0/2 — the parser's sentence terminator broke on the `.` inside
-  `($418,204.37)`, so every reclassification carrying an amount silently became
-  "not applied" and no cell could ever produce evidence). The remaining **7/9 evidence ids
-  appear in no document** and are only derivable once the ledger ships.
-- Ledger dialect torture-test (`python -m pipeline.test_ledger`): **all pass** — 8 formats
-  parse identically, plus FX and number-parsing edge cases.
-- Hostile-dialect round trip (`python -m pipeline.test_roundtrip`): the same 36 cells pushed
-  through a cp1251 / `;` / Cyrillic-header / NBSP / half-KZT file **+ FX table** still score
-  **36.000/36 = 1.0000** with **9/9** evidence — ingestion loses nothing.
-
-### Covenant coverage (36/36 computable from ledger)
-The leverage/cover ratios are all **signed sums of ledger categories** (EBITDA = Revenue−Opex),
-handled by a general ratio engine (`engine.ratio_formula`):
-
-| formula id | definition | example |
-|---|---|---|
-| interest_cover | EBITDA / Interest | B1 6.1 |
-| cover_sources | (Revenue+Financing) / (Opex+Capex) | P2 6.1 |
-| springing_leverage | Financing / EBITDA, active only if Financing > trigger $ | P3 6.1 |
-| ebitda_margin | EBITDA / Revenue | P4 6.1 |
-| group_capex_ebitda | GroupCapex / EBITDA | P5 6.1 |
-| tax_util_ebitda | (Taxes+Utilities) / EBITDA | P7 6.1 |
-| unrestricted_assets | AssetsToUnrestrictedSubs / Capex | P9 6.1 |
-| insurance_cover | Insurance / (Lease+Utilities) | P10 6.1 |
-| revenue_cover_payroll_util | Revenue / (Payroll+Utilities) | P6 6.2 |
-
-Three covenants are **not** category sums and were being computed wrong until the clause
-text was read properly (all found by mining the PDFs, all now pinned by `test_engine`):
-
-| cell | clause says | correct metric | the trap |
-|---|---|---|---|
-| B1 6.2 | "по отдельности, а **не в совокупности** … по **наибольшей** из указанных сумм; их сумма **не является** показателем" | `max(payroll, utilities)` | summing them turns a COMPLIANT cell into a BREACH |
-| P10 6.2 | "Выручка **за вычетом наибольшей** из величин Расходов на оплату труда и Налогов" | `revenue − max(payroll, tax)` | also contains "наибольш", but is a different covenant from B1 6.2 |
-| P6 6.1 | "превышал 0.08x **Операционных расходов**" | `related / opex` | every other related-party ratio divides by revenue |
-
-`reconstruct.py` is an integration fixture: it synthesises a ledger that reproduces the key's
-actuals, then proves the ledger→status/actual/evidence→score chain has no wiring/arithmetic/
-rounding/evidence bugs. It is not a generalisation score.
-
-**It also cannot catch a wrong metric definition** — it builds inputs that satisfy whatever
-formula the engine uses, so a wrong formula still scores 36/36. `validate.py` can't either;
-it only bracket-checks thresholds. 13 of 36 cells were computing the wrong quantity while
-both harnesses read green. Only the metric-definition tests in `test_engine.py`, written
-against clause wording mined from the PDFs, pin this down. **When in doubt, read the clause.**
-
-## Retrieval (RAG): what the model is allowed to read
-For most of this project nothing retrieved anything. Documents were routed whole by regex,
-clauses sliced by regex, and the classifier prompt carried a category list *we* wrote — judged
-against Kazakh payment narrations, with the borrower's contract sitting unread on disk. The
-sentence «Коммунальные расходы означают расходы на электроэнергию, водоснабжение» was in the
-corpus the whole time.
-
-`retrieval.py` indexes **1,309 passages from 189 documents** with BM25 (stdlib only) and the
-classifier's LLM prompt now carries the top passages from *that borrower's* contract and audit
-report, each attributed to its source filename so a surprising category can be traced to the
-passage that caused it.
-
-Three properties are load-bearing, and each is a test rather than an intention:
-
-- **The spec and answer key are never indexed.** Both name ACC-7801 in a worked example, so any
-  account-based router serves the answer key back as "context" and every number downstream
-  becomes self-fulfilling. So are the superseded 2024 contracts.
-- **Retrieval is scoped to one borrower.** Unscoped is worse than none: another borrower's
-  clause reads as authoritative and names a different threshold.
-- **Morphology is folded in on both sides.** The recurring bug in this repo is inflection
-  (`оплатУ труда` vs `оплат труда`); a retriever indexing surface forms inherits it at corpus
-  scale. Writing `test_retrieval` found two live instances: Kazakh two-letter suffixes were
-  eating Russian words (`оплате` → `опла` via KZ `те`, so the two inflections of one word
-  stopped sharing a stem), and `-ых/-их` was missing from the Russian table entirely.
-
-**Definition mining is deliberately NOT in the decision path.** `cli definitions` extracts every
-sentence where a contract defines a category, but measured against the 149 held-out narrations
-the mined terms fire on **1 of the 35 rows** the keyword table cannot decide — and get it wrong
-(«услуги по подбору ПЕРСОНАЛА» is a recruitment fee, which the table routes to opex on purpose).
-The reason is a property of this corpus: these contracts define categories *procedurally*
-(«суммы, отнесённые к данной статье в аудированной отчётности»), not by membership. It ships as
-a reading tool for event day, when the contracts are new and may not, with a test that fails if
-anyone autowires it without re-measuring.
-
-## Gemini notes
-- Key authenticates as a query-param key. `gemini-2.5-*` is gated on it; use the `-latest`
-  aliases. Workhorse is **`gemini-flash-lite-latest`** (highest free limits, ideal for
-  classification); `gemini-flash-latest`/`gemini-2.0-flash` have a much smaller shared pool and
-  exhaust quickly.
-- Free-tier request pools are small and **per-model**; when one 429s, another `-latest` alias may
-  still have quota. The client parses the server's `retry in Xs` and waits it out, does the heavy
-  lifting in deterministic code, and caches every reply under `cache/gemini/`.
-- Clean Gemini classifier run (flash-lite) on the labelled fixture: **22/22 = 100%** with 0 keyword
-  fallback (indicative — the fixture is hand-built; recalibrate on the real ledger).
-
-## Event-day checklist (when the real ledger arrives)
-The full runbook is `HANDOFF.md` §5; to swap the LLM, see `MODELS.md`.
-0. `solve.TEAM` is set (`darkhan`, `adarhan76@gmail.com`) — verify, don't re-set.
-1. Confirm `SCENARIO_TO_ACC` via `txn_id` prefix ↔ `account_id` in the ledger. The borrower
-   set comes from the ledger (`ledger.discover_scenario_map`), not from the constant, so a
-   13th borrower works without a code change — but check the count printed.
-2. `python -m pipeline.cli solve --ledger master_ledger_2025.csv` (add `--fx` if provided).
-   Read the ingestion report it prints *before* trusting the cells: rows loaded, currencies,
-   `scenarios resolved / 12`, and any `!!` line. `!!` means a whole class of cells is wrong.
-3. Tune the two data-dependent knobs against the ledger: the base transaction **classifier**
-   (`solve.base_classifier` — maps each counterparty/description to a category like capex,
-   opex, financing, interest, tax, utilities, insurance, related-party) and the
-   reclassification **applied/rejected** read (`reclass.py`). Spend Gemini budget here, on the
-   ~12 audit reports. The covenant math (all 8 formulas + springing + evidence) is already done.
-4. `python -m pipeline.cli score submission.json` and iterate.
-```
+`reconstruct`'s 36/36 and `validate`'s 34/36 are **in-sample** and are not accuracy.
