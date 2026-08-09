@@ -312,9 +312,70 @@ def _parse(raw: str) -> dict:
         return json.loads(m.group(0)) if m else {}
 
 
+# Legal forms are written differently in every system that touches a payment. The KYC dossiers
+# alone already carry "LLP", ", LLP" and "L.L.P" for the same kind of entity, and a Kazakh
+# ledger will add "ТОО", "АО", "JSC" and the quoted «...» form. None of it identifies anybody,
+# so it comes off before comparing.
+_LEGAL_FORMS = {"llp", "llc", "ltd", "lp", "jsc", "plc", "inc", "gmbh", "ag", "sa", "bv",
+                "тоо", "ао", "оао", "зао", "ип", "кт", "пк", "жшс", "ақ"}
+# Every related party in this dataset is a "<Place> Capital/Holding Partners LLP". The place is
+# the only distinguishing word; the rest recurs across nearly all of them. A match resting on
+# these alone would relate every borrower to every other one.
+_GENERIC_PARTY = {"capital", "holding", "holdings", "group", "partners", "partner", "invest",
+                  "investment", "investments", "company", "corp", "corporation", "trade",
+                  "trading", "finance", "financial", "management", "services", "service"}
+_PARTY_PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _party_tokens(name: str) -> frozenset[str]:
+    """The identifying words of a company name: punctuation and legal forms removed."""
+    flat = _PARTY_PUNCT.sub(" ", (name or "").lower())
+    # Single letters are debris from a punctuated legal form — «L.L.P» becomes "l l p" — and
+    # never identify a company. Without this, «Atyrau Holding Group L.L.P» carried tokens the
+    # ledger's «Atyrau Holding Group LLP» could not supply, and the party never matched.
+    return frozenset(w for w in flat.split() if len(w) > 1 and w not in _LEGAL_FORMS)
+
+
 def _is_related(counterparty: str, related: set[str]) -> bool:
-    cp = counterparty.lower().strip()
-    return any(cp == r.lower().strip() or r.lower().strip() in cp for r in related if r)
+    """Does this counterparty name one of the borrower's related parties?
+
+    The old test was `kyc_name in counterparty.lower()` — a literal substring, so the ledger had
+    to reproduce the dossier's punctuation exactly. It does not: the dossier says
+    «Aral Capital Partners, LLP» and a ledger writes «ARAL CAPITAL PARTNERS LLP», where the
+    comma alone is enough to miss. Four of five realistic renderings of that one name failed,
+    and a missed related party does not error — it reports $0 of related-party payments and the
+    cell reads COMPLIANT. Related-party payments decide every 6.3 clause plus P6 6.1: 13 of 36.
+
+    So compare identifying WORDS, not characters. Two guards keep this from over-matching,
+    which would be the worse failure:
+
+      * the identifying words must match as a SET, and any extra word the ledger adds must
+        itself be non-identifying. A plain subset test is too loose: «Aktau Holdings Trading
+        House LLP» contains every word of «Aktau Holdings LLP» and is a different company. So
+        «Aral Capital Partners Group LLP» matches (the extra word is generic) and
+        «Aktau Holdings Trading House» does not (`house` identifies something).
+      * at least one matched word must be distinctive. Otherwise «Aktau Holdings LLP» would
+        match the borrower ITSELF, «Aktau Port Services JSC», on the shared place name — and
+        booking a borrower's own trading receipts as related-party payments breaches the cell
+        outright.
+
+    Both errors are costly and in opposite directions: a miss reports $0 of related-party
+    payments and reads COMPLIANT, a false hit inflates the sum and reads BREACH. Where the
+    name is genuinely ambiguous this errs toward not matching, because a related party that
+    also appears in the KYC ownership table is caught by the deterministic override upstream.
+    """
+    cp_tokens = _party_tokens(counterparty)
+    if not cp_tokens:
+        return False
+    for r in related:
+        rt = _party_tokens(r)
+        if not rt or not rt <= cp_tokens:
+            continue
+        if (cp_tokens - rt) - _GENERIC_PARTY:    # the ledger added an identifying word
+            continue
+        if rt - _GENERIC_PARTY:                  # the match rests on a distinctive word
+            return True
+    return False
 
 
 def _account_of(txns) -> str | None:

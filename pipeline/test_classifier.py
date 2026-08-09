@@ -100,11 +100,77 @@ def run_keyword():
           + (f" — MISSING {sorted(gap)}" if gap else ""))
 
     hybrid_ok = run_hybrid_routing()
+    party_ok = run_related_party_matching()
 
-    passed = same and not misses and not gap and hybrid_ok
+    passed = same and not misses and not gap and hybrid_ok and party_ok
     print("\n" + ("DETERMINISTIC CLASSIFIER OK" if passed
                   else "DETERMINISTIC CLASSIFIER REGRESSION"))
     return passed
+
+
+def run_related_party_matching() -> bool:
+    """Does a related party survive being written the way a ledger writes it?
+
+    Related-party payments decide every 6.3 clause plus P6 6.1 — 13 of 36 cells — and the
+    match used to be a literal substring test, so the ledger had to reproduce the KYC
+    dossier's punctuation exactly. It does not. The dossiers themselves already disagree
+    («Aral Capital Partners, LLP», «Atyrau Holding Group L.L.P», «Ertis Capital, LLP»), and a
+    ledger writing «ARAL CAPITAL PARTNERS LLP» missed on the comma alone. A missed related
+    party does not raise: it reports $0 of related-party payments and the cell reads COMPLIANT.
+
+    Recall is measured against renderings of the REAL names in `image_facts.json`/the dossiers.
+    Precision matters just as much and in the opposite direction, so the second half checks
+    that no borrower's own name, and no other borrower's related party, ever matches."""
+    import re as _re
+    from . import config, docmap, reclass
+
+    dm = docmap.build(save=False)
+    rp = {acc: reclass.related_parties(acc, dm) for acc in config.SCENARIO_TO_ACC.values()}
+
+    def renderings(n: str) -> list[str]:
+        core = _re.sub(r"[,\.]", "", n)
+        bare = _re.sub(r"\b(LLP|L\.?L\.?P\.?)\b", "", n).strip(" ,.")
+        return [n, core, core.upper(), bare, f"ТОО «{bare}»", f"{bare} LLP",
+                f"{bare.upper()} LLP", f"АО {bare}", f"{bare}, ТОО"]
+
+    hit = total = 0
+    missed: list[str] = []
+    for acc, names in rp.items():
+        for n in names:
+            for v in renderings(n):
+                total += 1
+                if classifier._is_related(v, names):
+                    hit += 1
+                else:
+                    missed.append(f"{acc} {v!r}")
+    print(f"{'ok ' if hit == total else 'FAIL'} related party survives ledger rendering: "
+          f"{hit}/{total}" + (f" — missed {missed[:3]}" if missed else ""))
+
+    # Precision. «Aktau Holdings LLP» must NOT match the borrower itself, «Aktau Port Services
+    # JSC» — they share a place name — nor «Aktau Holdings Trading House LLP», a different
+    # company that contains every word of it.
+    strangers = ["Aktau Port Services JSC", "Ekibastuz Energy JSC", "Taraz Cement Works JSC",
+                 "Zhezkazgan Mining Services JSC", "Aktau Holdings Trading House LLP",
+                 "Almaty Warehouse LLP", "Halyk Bank", "Комитет госдоходов"]
+    fp: list[str] = []
+    pairs = 0
+    for acc, names in rp.items():
+        for other_acc, other in rp.items():
+            if other_acc == acc:
+                continue
+            for o in other:
+                pairs += 1
+                if classifier._is_related(o, names):
+                    fp.append(f"{o} -> {sorted(names)}")
+        for s in strangers:
+            if s in names:
+                continue
+            pairs += 1
+            if classifier._is_related(s, names):
+                fp.append(f"{s} -> {sorted(names)}")
+    print(f"{'ok ' if not fp else 'FAIL'} no false related-party match: "
+          f"{len(fp)} in {pairs} non-related pairings" + (f" — {fp[:3]}" if fp else ""))
+    return hit == total and not fp
 
 
 def run_fallback_experiment():
