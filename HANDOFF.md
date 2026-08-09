@@ -14,15 +14,15 @@ Only two numbers in this repo are out-of-sample. Quote these and no others:
 |---|---|---|
 | **Transaction classifier, first-contact accuracy** | **113/149 = 75.8%** | `python -m pipeline.test_holdout` |
 | **Metric rules corroborated by ≥2 borrowers** | **33/36 = 91.7%** | same |
-| Non-circular end-to-end vs the key | **29 cells exercised, 0 status disagreements** (22 at 1.000, 7 lose only evidence) | `python -m pipeline.test_e2e` |
+| Non-circular end-to-end vs the key | **31 cells exercised, 0 status disagreements** (24 at 1.000, 7 lose only evidence) | `python -m pipeline.test_e2e` |
 | Docs-only floor (no ledger at all) | 10.011/36 = 27.8% | `solve` with no `--ledger` |
 
 Everything else — `reconstruct`'s 36/36, `validate`'s 34/36, `cli score` with no file,
 `make_ledger`'s 8.5/36 — is in-sample or anti-sample and is **not accuracy**. Do not put any
 of them in a slide.
 
-`test_e2e` prints `TOTAL 27.600 / 36 = 0.7667`; that denominator includes the 7 cells the
-harness cannot materialise, scored 0. The status-agreement rate on what it *can* test is 29/29.
+`test_e2e` prints `TOTAL 29.600 / 36 = 0.8222`; that denominator includes the 5 cells the
+harness cannot materialise, scored 0. The status-agreement rate on what it *can* test is 31/31.
 
 Nothing is uncommitted. The circuit breaker in `classifier.classify_hybrid` (2 consecutive API
 failures → stop calling) is committed and tested.
@@ -111,16 +111,42 @@ ratio misread as related-party because "связанные С НИМИ расх�
 
 ## 3. Cells `test_e2e` cannot reach
 
-Seven of 36 are unexercised by the only non-circular harness. Two are genuinely undecidable;
-the rest would need harness work of decreasing value:
+**Five** of 36 are unexercised by the only non-circular harness (was seven). Two are genuinely
+undecidable; the rest are harness-vocabulary limits, not engine doubts:
 
 | cell | why | worth fixing? |
 |---|---|---|
 | P4 6.3, P8 6.3 | key `actual` equals its own threshold within rounding — the key's rounding, not the engine, sets the verdict | **No.** Undecidable by construction. |
-| P3 6.1, P7 6.1 | harness cannot materialise `ebitda` as ledger rows | Maybe — needs the bisection to handle a derived variable. |
 | P5 6.1 | cannot materialise `group_capex`; the engine's `group_capex / __ebitda__` correctly matches «капитальных затрат Группы к EBITDA Заёмщика» — it is the *harness* vocabulary that has no Group scope | **Not a bug.** Harness limitation only. |
 | P4 6.1 | EBITDA add-back of $824,153 moves actual 0.33 → 1.15; undecidable at synthetic revenue scale | Low. |
-| P9 6.1 | no independent formula was written for it | Yes, if a cold agent can write one. |
+| P9 6.1 | `expected_semantics` records it as NOT EXPRESSIBLE: the numerator is a counterparty-filtered SUBSET of capex, not a category | **Only by a cold agent.** See below. |
+
+**Do not write P9 6.1's formula yourself.** The harness is worth having for exactly one reason:
+`expected_semantics.EXPECTED` was written by an agent that never opened `engine.py`. Adding
+`unrestricted_assets` to the harness vocabulary and writing the formula after reading the
+engine converts the repo's only non-circular check into a partially circular one, and it will
+still read green — which is precisely the failure mode 13 of 36 cells once hid in.
+
+**P3 6.1 and P7 6.1 are now exercised**, and getting there fixed three ways the harness lied:
+
+- `ebitda` is materialisable after all. The independent reading says so itself in both cells
+  («sibling contracts P5 and B1 define it as «Выручка за вычетом Операционных расходов», so
+  revenue - opex is the natural fill-in») and writes that expansion out by hand for P4 6.1 and
+  P5 6.1, so substituting it stays inside the independent reading.
+- **Springing covenants must be constructed above their own trigger.** P3 6.1 applies «ТОЛЬКО
+  ПРИ УСЛОВИИ, что совокупные поступления по финансированию превышают $4,000,000.00»; the
+  bisection solved for a 1.71x ratio at $1.4M of financing, the engine correctly declined to
+  spring, and the cell read as a metric disagreement. Ratio constructions are now scaled past
+  the trigger, which leaves `actual` untouched.
+- **A construction with a negative category total is not a ledger.** The bisection returned
+  tax = −994,160, `totals_to_txns` took `abs()`, and the materialised rows no longer satisfied
+  the formula they were built from — P7 6.1 read 2.26 against the key's 0.36. Negative totals
+  are now rejected, and the free variable is chosen by trying each candidate, because for
+  «(tax + utilities) / (revenue - opex)» at 0.36x solving for `tax` needs a negative numerator
+  at every scale while solving for `revenue` lands everything positive.
+- A ratio is a **hyperbola** in its denominator. A global bisection walks through the pole and
+  converges on nothing, and the pole straddles the target without equalling it — so the search
+  scans a grid, collects *every* straddling interval, and bisects inside each.
 
 If you extend the harness: synthetic txn ids **must avoid the 0001 block** (TXN-P3-0001 is a real
 applied reclassification, so a synthetic revenue row gets reclassified out of revenue), and
@@ -206,7 +232,7 @@ borrower's own contract and audit report, each tagged with its source filename.
 
 **Nothing in the honest numbers moved**, and that is correct — retrieval only grounds the LLM
 path, and the LLM path only touches rows the keyword table could not decide. 113/149, 33/36 and
-the 29/29 e2e agreement are unchanged. `make_ledger`'s dress rehearsal still computes 36/36
+the e2e agreement are unchanged. `make_ledger`'s dress rehearsal still computes 36/36
 cells with 12/12 scenarios resolved.
 
 Three guards are tested, not assumed, because each is a silent poisoning channel:
@@ -256,6 +282,35 @@ Measured: **108/108** recall on ledger renderings, **0 false positives in 228** 
 pairings, pinned by `run_related_party_matching` in `test_classifier`. On event day, watch for
 Cyrillic transliteration of a Latin name («Сарыарка» for «Saryarka») — that is the one class
 this matcher still cannot bridge, and it would need the real ledger to confirm it happens.
+
+---
+
+## 10. The archive may not extract flat — the single largest risk that was still open
+
+The spec's dataset table says the PDFs arrive inside a folder: «`documents/` — **Одна папка**
+со всеми PDF-документами датасета». **This practice release extracts flat**, and every
+discovery path in the pipeline was `DATASET.iterdir()` filtered by `is_file()`, which skips a
+subdirectory in silence.
+
+Measured against a nested copy of this exact corpus, before the fix: **1 document classified,
+0 accounts resolved, 0 contracts selected, 36 empty cells.** No exception, no traceback, and
+not one `!!` line naming the cause. The entire score, lost to a folder, in a run that looks
+like it worked.
+
+Discovery now walks the tree through `config.dataset_files()`, and — just as important —
+bare filenames resolve through `config.dataset_path()`. Documents are keyed by bare filename
+everywhere (`docmap` stores `d.name`; four modules re-join it against `DATASET`), and that
+join is the thing that breaks; it now happens in exactly one place. `docmap` prints which
+shape it found, because "1 document classified" is otherwise indistinguishable from "the
+archive is empty".
+
+`test_docs` builds a nested copy of the real corpus in a temp directory and asserts the whole
+document layer comes out identical: 206 documents, 12 borrowers routed, 12/12 live contracts,
+12/12 related parties, retrieval index intact.
+
+**On event day, read `docmap`'s first line before anything else.** If the archive is nested it
+will say so; if it says nothing and the document count looks low, stop and look at the folder
+before trusting a single cell.
 
 ---
 

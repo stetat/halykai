@@ -146,7 +146,7 @@ Expected, and **not allowed to move on a model swap**:
 |---|---|
 | classifier first-contact accuracy | 113/149 = 75.8% |
 | metric rules corroborated by ≥2 borrowers | 33/36 = 91.7% |
-| non-circular e2e vs the key | 29 cells exercised, 0 status disagreements |
+| non-circular e2e vs the key | 31 cells exercised, 0 status disagreements |
 | hostile-dialect round trip | 36.000/36 = 1.0000, evidence 9/9 |
 
 Then the paid checks, in this order — each costs quota, so stop at the first failure:
