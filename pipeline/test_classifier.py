@@ -8,6 +8,7 @@ the grader's real transaction style — treat it as a calibration signal, not a 
 Run:  python -m pipeline.test_classifier
 """
 from __future__ import annotations
+import json
 from .ledger import Txn
 from . import classifier
 from .engine import (CAPEX, OPEX, LEASE, REVENUE, RELATED_PARTY, INSURANCE, PAYROLL,
@@ -101,11 +102,64 @@ def run_keyword():
 
     hybrid_ok = run_hybrid_routing()
     party_ok = run_related_party_matching()
+    sign_ok = run_sign_guard()
 
-    passed = same and not misses and not gap and hybrid_ok and party_ok
+    passed = same and not misses and not gap and hybrid_ok and party_ok and sign_ok
     print("\n" + ("DETERMINISTIC CLASSIFIER OK" if passed
                   else "DETERMINISTIC CLASSIFIER REGRESSION"))
     return passed
+
+
+def run_sign_guard() -> bool:
+    """An LLM answer that contradicts the ledger's own sign is rejected.
+
+    Measured on the rehearsal ledger before this guard existed: Gemini read
+    «Оплата за перевалку зерна по договору» (+$919,138 from ContainerLine Co — the borrower
+    being PAID to tranship grain) as opex, because «Оплата за …» reads like "payment for …".
+    It did that to all three of P5's revenue rows. P5 6.2 is a MIN_REVENUE covenant, so its
+    actual collapsed from $2,906,313 to $0.00, and P6 6.2 flipped COMPLIANT -> BREACH.
+
+    The spec states the convention outright — «Расходы записаны отрицательными суммами,
+    поступления — положительными» — and the prompt already asks the model to respect it. It
+    did not, which is the whole point: a rule the model may ignore is not a constraint."""
+    from .engine import REVENUE, OPEX, FINANCING, TAX
+
+    inflow = _mk(1, "ContainerLine Co", "Оплата за перевалку зерна по договору", 919_138.0)
+    outflow = _mk(2, "Комитет госдоходов", "Уплата НДС за 2 квартал", -55_000.0)
+    ok = True
+
+    cases = [
+        ("a receipt is never opex", OPEX, inflow, True),
+        ("a receipt is never tax", TAX, inflow, True),
+        ("a receipt may be revenue", REVENUE, inflow, False),
+        ("a receipt may be financing", FINANCING, inflow, False),
+        ("a payment is never revenue", REVENUE, outflow, True),
+        ("a payment may be tax", TAX, outflow, False),
+    ]
+    for label, cat, txn, want_reject in cases:
+        got = classifier._contradicts_sign(cat, txn)
+        print(f"{'ok ' if got == want_reject else 'FAIL'} {label}")
+        ok &= got == want_reject
+
+    # and the guard must actually be wired into the hybrid path, not merely defined
+    class _FakeGemini:
+        def generate(self, *a, **k):
+            return json.dumps({inflow.txn_id: OPEX})
+
+    real = classifier.gemini
+    try:
+        classifier.gemini = _FakeGemini()
+        classifier.reset_breaker()
+        out = classifier.classify_hybrid([inflow])
+        st = classifier.classify_hybrid.last_stats
+        good = out[inflow.txn_id] != OPEX and st.get("sign_rejected") == 1
+        print(f"{'ok ' if good else 'FAIL'} hybrid rejects a sign-contradicting LLM answer "
+              f"(kept {out[inflow.txn_id]!r}, sign_rejected={st.get('sign_rejected')})")
+        ok &= good
+    finally:
+        classifier.gemini = real
+        classifier.reset_breaker()
+    return bool(ok)
 
 
 def run_related_party_matching() -> bool:

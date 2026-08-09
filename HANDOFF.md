@@ -285,6 +285,31 @@ this matcher still cannot bridge, and it would need the real ledger to confirm i
 
 ---
 
+## 10b. The ledger's SIGN outranks the model
+
+Found by running `--classifier hybrid` against the rehearsal ledger with real Gemini calls.
+Gemini read «Оплата за перевалку зерна по договору» — **+$919,138** from ContainerLine Co, the
+borrower being PAID to tranship grain — as **opex**, because «Оплата за …» reads like "payment
+for …". It did that to all three of P5's revenue rows. P5 6.2 is a MIN_REVENUE covenant, so its
+`actual` collapsed from $2,906,313 to **$0.00**, and P6 6.2 flipped COMPLIANT → BREACH.
+
+The spec states the convention outright — «Расходы записаны отрицательными суммами, поступления
+— положительными» — and the prompt already asked the model to respect it. It did not. **A rule
+the model may ignore is not a constraint.** `classifier._contradicts_sign` now rejects any LLM
+answer that contradicts the direction of the money (a receipt is never opex/tax/payroll; a
+payment is never revenue/financing) and keeps the deterministic answer instead. `other` is
+exempt — it carries no direction.
+
+Measured on the rehearsal ledger, the guard removed both regressions and kept all four cells
+where the LLM genuinely improved on the keyword table. `solve` reports `sign_rejected` per run;
+a high count means the prompt and the ledger disagree about direction and is worth reading.
+
+Refunds are the honest objection — a negative revenue line is a legitimate credit note. But a
+contradiction does not invent an answer, it falls back to the deterministic one, and on the
+held-out narrations the sign is right 35/35 on exactly this class of row.
+
+---
+
 ## 10. The archive may not extract flat — the single largest risk that was still open
 
 The spec's dataset table says the PDFs arrive inside a folder: «`documents/` — **Одна папка**

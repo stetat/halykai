@@ -378,6 +378,38 @@ def _is_related(counterparty: str, related: set[str]) -> bool:
     return False
 
 
+# The ledger's sign is not a hint, it is stated: «Расходы записаны отрицательными суммами,
+# поступления — положительными» (CASE.ru.md, §2). Only two categories can be a RECEIPT; the
+# rest are things money was spent on.
+_INFLOW_ONLY = {REVENUE, FINANCING}
+_OUTFLOW_ONLY = {CAPEX, OPEX, LEASE, PAYROLL, UTILITIES, TAX, INTEREST, INSURANCE,
+                 RELATED_PARTY, GROUP_CAPEX, UNRESTRICTED_ASSETS}
+
+
+def _contradicts_sign(cat: str, t) -> bool:
+    """Does this category contradict the direction of the money?
+
+    Measured on the rehearsal ledger: Gemini read «Оплата за перевалку зерна по договору»
+    (+$919,138 from ContainerLine Co — the borrower being PAID to tranship grain) as opex,
+    because «Оплата за …» reads like "payment for …". It did that to all three of P5's revenue
+    rows, and P5 6.2 is a MIN_REVENUE covenant: its actual collapsed from $2,906,313 to $0.00.
+
+    The prompt already asks the model to respect the sign and it did not, which is the point —
+    a rule the model may ignore is not a constraint. This is, and it costs nothing when the
+    model is right. `other` is exempt: it is the "no category" answer and carries no direction.
+
+    Refunds are the honest objection — a negative revenue line is a legitimate credit note, and
+    the engine nets signed amounts within a category precisely so refunds reduce it. But a
+    contradiction here does not invent an answer, it falls back to the deterministic one, and
+    on the held-out narrations the sign is right 35/35 on exactly this class of row."""
+    amount = t.amount_usd if t.amount_usd is not None else t.amount
+    if not amount:
+        return False
+    if amount > 0:
+        return cat in _OUTFLOW_ONLY
+    return cat in _INFLOW_ONLY
+
+
 def _account_of(txns) -> str | None:
     """The borrower these transactions belong to, for scoping retrieval.
 
@@ -396,7 +428,8 @@ def classify_batch(txns, related_parties=None, model=None, chunk=150) -> dict[st
     related = related_parties or set()
     acc = _account_of(txns)
     out: dict[str, str] = {}
-    stats = {"llm": 0, "fallback": 0, "related_override": 0, "errors": []}
+    stats = {"llm": 0, "fallback": 0, "related_override": 0, "sign_rejected": 0,
+             "errors": []}
     for i in range(0, len(txns), chunk):
         part = txns[i:i + chunk]
         try:
@@ -413,10 +446,12 @@ def classify_batch(txns, related_parties=None, model=None, chunk=150) -> dict[st
                 stats["related_override"] += 1
                 continue
             cat = mp.get(t.txn_id)
-            if cat in _VALID:
+            if cat in _VALID and not _contradicts_sign(cat, t):
                 out[t.txn_id] = cat
                 stats["llm"] += 1
             else:
+                if cat in _VALID:
+                    stats["sign_rejected"] += 1
                 out[t.txn_id] = keyword_category(t)
                 stats["fallback"] += 1
     classify_batch.last_stats = stats            # inspectable after the call
@@ -466,7 +501,8 @@ def classify_hybrid(txns, related_parties=None, model=None, chunk=150) -> dict[s
     acc = _account_of(txns)
     out: dict[str, str] = {}
     uncertain = []
-    stats = {"deterministic": 0, "asked": 0, "llm_used": 0, "related_override": 0, "errors": []}
+    stats = {"deterministic": 0, "asked": 0, "llm_used": 0, "related_override": 0,
+             "sign_rejected": 0, "errors": []}
 
     for t in txns:
         if _is_related(t.counterparty, related):
@@ -497,9 +533,15 @@ def classify_hybrid(txns, related_parties=None, model=None, chunk=150) -> dict[s
             _breaker_trip()
             continue                              # keep the deterministic answer
         for t in part:
-            if mp.get(t.txn_id) in _VALID:
-                out[t.txn_id] = mp[t.txn_id]
-                stats["llm_used"] += 1
+            cat = mp.get(t.txn_id)
+            if cat not in _VALID:
+                continue
+            if _contradicts_sign(cat, t):
+                # keep the deterministic answer; the ledger's sign outranks the model
+                stats["sign_rejected"] += 1
+                continue
+            out[t.txn_id] = cat
+            stats["llm_used"] += 1
 
     classify_hybrid.last_stats = stats
     return out
