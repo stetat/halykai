@@ -173,26 +173,77 @@ non-monotonic.
 
 ## 5. Event-day runbook (the real ledger + FX table arrive)
 
-The math is done. Event day is ingestion + the two data-dependent knobs.
+The math is done. Event day is **ingestion + two data-dependent knobs**. Work in this order and
+do not skip step 1 — it is the only step that can silently cost every cell.
 
-1. **Commit the circuit breaker** if it is still uncommitted.
-2. `python -m pipeline.cli solve --ledger master_ledger_2025.csv --fx FX.csv`
+### Phase 1 — prove the data loaded (5 minutes, no API)
+
+```bash
+python -m pipeline.cli map          # what got classified, and from where
+```
+
+1. **Check the archive shape FIRST.** If the PDFs arrived inside `documents/`, `docmap` prints
+   `dataset is nested — reading N files from [...]`. Either way, confirm the document count is
+   ~200 and the contract table shows a file for all 12 borrowers. **A count near 1 means the
+   files are somewhere discovery did not look** — see §10. This failure prints no error.
+2. Confirm the borrower set. `ledger.discover_scenario_map()` majority-votes the real
+   scenario↔account pairs out of the rows and `config.set_scenario_map()` adopts them, **mutating
+   both dicts in place** (several modules do `from .config import SCENARIO_TO_ACC`; rebinding
+   leaves them on the old map). A 13th borrower works without a code change — verified with a
+   synthetic P11/ACC-7811 — but check the count printed.
+
+### Phase 2 — a free baseline you can always fall back to
+
+```bash
+python -m pipeline.cli solve --ledger master_ledger_2025.csv --fx FX.csv
+```
+
 3. **Read the ingestion report before trusting any cell.** Every `!!` line means a whole class of
    cells is wrong: unresolved columns, non-USD rows with no FX table, unmapped rows, empty
    scenarios, untranscribed images, cells left empty, and the sign-fallback percentage.
-4. Confirm the borrower set. `ledger.discover_scenario_map()` majority-votes the real
-   scenario↔account pairs out of the rows and `config.set_scenario_map()` adopts them, **mutating
-   both dicts in place** (several modules do `from .config import SCENARIO_TO_ACC`; rebinding
-   leaves them on the old map). If a 13th borrower appears it should just work — verified with a
-   synthetic P11/ACC-7811 — but check the count printed.
-5. **Tune the two knobs against the real narrations**: the classifier vocabulary
-   (`classifier.keyword_category`; `solve.base_classifier` is an *alias*, never a copy — a stale
-   copy once scored 23% vs 100%) and the applied/rejected reclassification read in `reclass.py`.
-   Spend the Gemini budget here, on the ~12 audit reports.
-6. `python -m pipeline.cli score submission.json` and iterate.
-7. If images have been swapped for event day, `python -m pipeline.cli ocr` re-reads them with
-   Gemini vision into `cache/image_facts_ocr.json`; verified values in `image_facts.json` always
-   win. `pdfimages.untranscribed_image_docs()` detects any new image doc and `solve` shouts.
+   `scenarios resolved / N` must equal the borrower count.
+4. Keep this `submission.json`. It costs no quota, it is never blank, and it is the floor
+   everything after this has to beat.
+
+### Phase 3 — spend the quota where it pays
+
+```bash
+python -m pipeline.cli check                                          # 1 call — auth + model id
+python -m pipeline.cli solve --ledger ... --fx ... --classifier hybrid # 1 call per borrower
+```
+
+5. `hybrid` asks the model only about rows no rule decided (~15–28%). `gemini` sends every row,
+   costs far more quota and 429s sooner — use it only on an unmetered/local model.
+6. **Diff hybrid against the keyword baseline before believing it.** On the rehearsal ledger the
+   model improved 4 cells and destroyed 2 (§10b). The sign guard now catches that class, but
+   diff anyway — it is 10 lines of Python and it is the only thing standing between a plausible
+   answer and a wrong one:
+   ```python
+   import json; a=json.load(open("keyword.json"))["answers"]; b=json.load(open("submission.json"))["answers"]
+   [print(sc,c,a[sc][c]["actual"],"->",b[sc][c]["actual"]) for sc in a for c in a[sc]
+    if a[sc][c]["actual"]!=b[sc][c]["actual"]]
+   ```
+7. Watch `sign_rejected` in the run report. A high count means the model and the ledger disagree
+   about the direction of money, and the model is losing on purpose — read a few of those rows.
+
+### Phase 4 — tune the two knobs, then iterate
+
+8. **The two knobs are the only data-dependent code**: the classifier vocabulary
+   (`classifier._RULES`; `solve.base_classifier` is an *alias*, never a copy — a stale copy once
+   scored 23% vs 100%) and the applied/rejected reclassification read in `reclass.py`. Read
+   `python -m pipeline.cli definitions` and a sample of real narrations before editing either.
+9. Re-run `python -m pipeline.test_classifier` after **every** vocabulary edit. Adding a token
+   steals rows from another category; that is how «вознаграждение» poisoned nine denominators.
+10. `python -m pipeline.cli score submission.json` and iterate.
+11. If images were swapped, `python -m pipeline.cli ocr` re-reads them with model vision into
+    `cache/image_facts_ocr.json`; verified values in `image_facts.json` always win.
+    `pdfimages.untranscribed_image_docs()` detects any new image doc and `solve` shouts.
+
+### Before you submit
+
+- Every cell filled — a blank and a wrong cell score the same, so **always guess** (§4).
+- `team` / `contact_email` / `model` correct in the envelope (`solve.TEAM = "darkhan"`).
+- No `!!` line left unexplained in the final run.
 
 Rate limits: free tier is ~20 requests/window and **per-model**. Workhorse is
 `gemini-flash-lite-latest`; `gemini-2.5-*` is gated on this key. A 429 falls back to keywords and
