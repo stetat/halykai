@@ -10,13 +10,35 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from . import config, pdftext
 
-ACC_RE = re.compile(r"ACC-\d{4}")
-COVENANT_RE = re.compile(r"Пункт\s+6\.[123]\b")
-DEAD_RE = re.compile(r"НЕДЕЙСТВУЮЩАЯ|НЕ ПРИМЕНЯЕТСЯ|устаревш|предыдущ(?:ая|ей) редакц|черновик")
+# The practice release numbered every borrower ACC-####. The real one does not: scenario KC's
+# account is `TELE-4471`. A pattern hardcoding "ACC" drops that borrower's documents on the
+# floor and costs all of its cells, so the ids the LEDGER actually reported are matched
+# literally, with ACC-#### kept as the fallback for a run with no ledger.
+_GENERIC_ACC_RE = re.compile(r"ACC-\d{4}")
+
+
+def account_pattern() -> re.Pattern:
+    known = [a for a in config.SCENARIO_TO_ACC.values() if a]
+    if not known:
+        return _GENERIC_ACC_RE
+    alts = "|".join(sorted((re.escape(a) for a in known), key=len, reverse=True))
+    return re.compile(rf"(?:{alts}|ACC-\d{{4}})")
+
+
+# Covenants are not always Article 6: J4's contract numbers them 5.1/5.2/5.3, and X1..X3 carry
+# a fourth, 6.4. Anchoring on "6.[123]" silently classifies those contracts as non-contracts.
+# One borrower's entire document set is in ENGLISH (ACC-7604 / J4 — a Dutch auditor and a
+# «CREDIT AGREEMENT» rather than a «ДОГОВОР БАНКОВСКОГО ЗАЙМА»), so every Russian-only pattern
+# here silently classified its contract as not-a-contract and cost all three of its cells.
+COVENANT_RE = re.compile(r"Пункт\s+[56]\.\d\b|Section\s+[56]\.\d\b", re.I)
+DEAD_RE = re.compile(r"НЕДЕЙСТВУЮЩАЯ|НЕ ПРИМЕНЯЕТСЯ|устаревш|предыдущ(?:ая|ей) редакц|черновик"
+                     r"|SUPERSEDED|NOT OPERATIVE|PRIOR-YEAR AGREEMENT|superseded by", re.I)
 YEAR_COV_RE = re.compile(r"с (20\d{2})-01-01 по (20\d{2})-12-31")
-CONTRACT_RE = re.compile(r"ДОГОВОР БАНКОВСКОГО ЗАЙМА")
-AUDIT_RE = re.compile(r"аудит|независим\w+ заключени|финансов\w+ отч[её]тност", re.I)
-KYC_RE = re.compile(r"KYC|клиентск\w+ дось|идентификаци\w+ клиента|надлежащ\w+ проверк", re.I)
+CONTRACT_RE = re.compile(r"ДОГОВОР БАНКОВСКОГО ЗАЙМА|CREDIT AGREEMENT", re.I)
+AUDIT_RE = re.compile(r"аудит|независим\w+ заключени|финансов\w+ отч[её]тност"
+                      r"|Notes to the Financial Statements|Agreed-Upon|Registered Auditors", re.I)
+KYC_RE = re.compile(r"KYC|клиентск\w+ дось|идентификаци\w+ клиента|надлежащ\w+ проверк"
+                    r"|Know Your Customer|customer due-diligence", re.I)
 # A dossier is identified by its registration number / title, not by loose keywords. Needed
 # because the dossiers mention "финансовой отчётностью" and so also match AUDIT_RE — the
 # elif routing below then filed them under "audits" (ACC-7809's dossier ended up there).
@@ -26,6 +48,15 @@ STRONG_KYC_RE = re.compile(r"KYC-ACC-\d{4}|Досье\s+«?Знай своего
 # alone files the specification itself under ACC-7801's audit reports — and its example
 # transaction then surfaces as one of that borrower's reclassifications.
 SPEC_RE = re.compile(r"Halyk AI Challenge|submission_template\.json|evidence_txn_id")
+
+# The transaction ledger is DATA, not a borrower document. It names every borrower's account, so
+# routing by account id files a 310,000-character CSV under all 27 of them — and then every
+# document regex runs over it, 27 times. Two consequences, and the slow one is the lesser:
+#   * `reclass` found SIX "reclassifications" inside the ledger's own rows, because the file is
+#     full of TXN- ids and prose descriptions. Invented reclassifications move real money
+#     between categories.
+#   * it cost ~110 seconds per borrower — 45 minutes for a 27-borrower run, silently.
+LEDGER_RE = re.compile(r"^[^\n]{0,200}\btxn_id\b[^\n]{0,200}[,;\t][^\n]{0,200}$", re.I | re.M)
 
 
 @dataclass
@@ -42,12 +73,13 @@ class Doc:
     n_dead_markers: int = 0
     is_kyc_dossier: bool = False       # the authoritative ownership file, not a procedure
     is_spec: bool = False              # challenge spec / answer key, not a borrower doc
+    is_ledger: bool = False            # the transaction ledger itself — data, not a document
 
 
 def classify(path: Path) -> Doc:
     ftype = pdftext.true_type(path)
     text = pdftext.extract_text(path)
-    accs = sorted(set(ACC_RE.findall(text)))
+    accs = sorted(set(account_pattern().findall(text)))
     has_cov = bool(COVENANT_RE.search(text))
     year = None
     m = YEAR_COV_RE.search(text)
@@ -66,6 +98,7 @@ def classify(path: Path) -> Doc:
         outdated=outdated, n_dead_markers=n_dead,
         is_kyc_dossier=bool(STRONG_KYC_RE.search(text)),
         is_spec=bool(SPEC_RE.search(text)),
+        is_ledger=bool(LEDGER_RE.search(text[:4000])),
     )
 
 
@@ -83,7 +116,7 @@ def build(save: bool = True) -> dict:
     docs = [classify(p) for p in files]
     by_acc: dict[str, dict] = {}
     for d in docs:
-        if d.is_spec:            # never route the spec/key to a borrower
+        if d.is_spec or d.is_ledger:   # never route the spec/key/ledger to a borrower
             continue
         for acc in d.accs:
             by_acc.setdefault(acc, {"contracts": [], "audits": [], "kyc": [], "other": []})

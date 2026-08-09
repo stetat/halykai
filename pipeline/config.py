@@ -4,7 +4,12 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATASET = ROOT / "dataset"
+
+# The event-day archive is a different directory from the practice release, and it must not be
+# merged with it: discovery walks the tree, so leaving the real data inside `dataset/` would
+# route two corpora's documents to one set of borrowers. Point DATASET_DIR at the archive root
+# (the folder holding `documents/` and `submission_template.json`).
+DATASET = Path(os.environ.get("DATASET_DIR") or (ROOT / "dataset")).expanduser()
 CACHE = ROOT / "cache"
 TXT_CACHE = CACHE / "txt"
 GEMINI_CACHE = CACHE / "gemini"
@@ -74,6 +79,23 @@ def set_scenario_map(mapping: dict[str, str]) -> None:
 _IGNORED_DIRS = {"__MACOSX"}
 
 
+_ARCHIVE_MARKER = "submission_template.json"
+
+
+def _nested_archive_roots() -> list["Path"]:
+    """Sub-directories that are their own dataset, and so must not be absorbed into this one.
+
+    Keeping the event-day archive inside the practice `dataset/` is the obvious thing to do and
+    it silently merges two corpora: 516 files, two sets of borrowers, and one borrower's
+    documents routed to another's cells. A dataset root is identifiable — it carries its own
+    `submission_template.json` — so a directory holding one is a separate archive, and this
+    dataset stops at its edge. Point DATASET_DIR at it to work on it instead."""
+    if not DATASET.exists():
+        return []
+    return [m.parent for m in DATASET.rglob(_ARCHIVE_MARKER)
+            if m.is_file() and m.parent != DATASET]
+
+
 def dataset_files() -> list["Path"]:
     """Every dataset file, at any depth, deterministically ordered.
 
@@ -82,10 +104,12 @@ def dataset_files() -> list["Path"]:
     change answer only because a folder appeared."""
     if not DATASET.exists():
         return []
+    foreign = _nested_archive_roots()
     out = [p for p in DATASET.rglob("*")
            if p.is_file()
            and not p.name.startswith(".")            # .DS_Store; NB `_Thumbs.db` is a real
-           and not any(d in _IGNORED_DIRS for d in p.parts)]   # contract and must be kept
+           and not any(d in _IGNORED_DIRS for d in p.parts)   # contract and must be kept
+           and not any(root in p.parents for root in foreign)]
     return sorted(out, key=lambda p: (p.name, str(p)))
 
 
@@ -113,5 +137,26 @@ def reset_dataset_cache() -> None:
     _PATH_CACHE.clear()
 
 
-# The pre-filled template doubles as the answer key for this practice release.
+# On the practice release the template is PRE-FILLED and doubles as the answer key. On event
+# day it ships blank — same file, no answers — so anything reading it must tolerate nulls.
 ANSWER_KEY = dataset_path("submission_template.json")
+
+
+def submission_template() -> dict:
+    """The template's scenario -> [clause ids] structure: exactly the cells we owe.
+
+    The practice release was 12 borrowers x {6.1,6.2,6.3}. The real one is 27 borrowers, three
+    of which carry a 6.4 and one (J4) whose covenants are numbered under Article 5 — so a
+    hardcoded ("6.1","6.2","6.3") both invents cells nobody asked for and silently omits four
+    that were asked for. The template is the authority on which cells exist."""
+    import json
+    try:
+        data = json.loads(ANSWER_KEY.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    answers = data.get("answers") or data.get("scenarios") or {}
+    out = {}
+    for sc, v in answers.items():
+        covs = v.get("covenants", v) if isinstance(v, dict) else {}
+        out[sc] = sorted(covs.keys())
+    return out

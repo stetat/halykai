@@ -12,6 +12,7 @@ Without a ledger the ledger-dependent fields stay null; the file is still valid 
 from __future__ import annotations
 import argparse
 import json
+from statistics import median
 from . import config, docmap, covenants, reclass, engine, scorer, classifier, ledger as ledgermod
 from .engine import Categorizer, RELATED_PARTY
 
@@ -129,7 +130,10 @@ def _adopt_ledger_scenarios(txns) -> None:
     resolves to no scenario and those cells score zero — silently, because the pipeline has no
     way to know it was supposed to see them. The ledger states the pairing in every row, so
     adopt what it says and report any difference loudly rather than trusting the constant."""
-    found = ledgermod.discover_scenario_map(txns)
+    # Constrained to the scenarios the template actually asks for: the real ledger carries 800
+    # counterparty rows with numeric txn prefixes, which unconstrained look like 575 borrowers.
+    allowed = set(config.submission_template()) or None
+    found = ledgermod.discover_scenario_map(txns, allowed=allowed)
     if not found:
         print("!! could not read any scenario<->account pair from the ledger; keeping the "
               "built-in map. Check ledger.TXN_RE against the real txn_id format.")
@@ -151,9 +155,19 @@ def _adopt_ledger_scenarios(txns) -> None:
     for k, v in absent.items():
         print(f"!! {k} ({v}) has no rows in the ledger; keeping it so its cells still get an "
               f"answer.")
-    # Keep borrowers the ledger omits: they still have contracts, and a guessed cell beats a
-    # blank one. Ledger entries win on conflict.
-    merged = {**current, **found}
+    # Keep a built-in borrower ONLY if the template still asks for it. That rule used to be
+    # "keep everything, a guessed cell beats a blank one", which was right while the built-in
+    # map was a hypothesis about THIS dataset. Against the real archive it is wrong: the
+    # constant describes a different contest, so merging injected 12 phantom borrowers
+    # (P1..P10, B1, B4) that no template cell asks for, each printing "no transactions" and
+    # each emitting three invented cells.
+    wanted = set(config.submission_template())
+    keep = {k: v for k, v in current.items() if not wanted or k in wanted}
+    dropped = sorted(set(current) - set(keep))
+    if dropped:
+        print(f"   dropped {len(dropped)} built-in borrower(s) the template does not ask for: "
+              f"{dropped}")
+    merged = {**keep, **found}
     config.set_scenario_map(merged)
     ledgermod.refresh_known_scenarios()
     moved = ledgermod.reresolve(txns)
@@ -188,10 +202,24 @@ def _fill_unresolved(answers: dict, unresolved: list) -> None:
           f"them blank — a blank scores 0, a guess cannot score less.")
     print(f"   status prior = {majority} "
           f"({verdicts.count(majority)}/{len(verdicts)} of the computed cells)")
+    # The clause's own threshold is the best available guess for `actual` — a covenant is
+    # usually tested near its limit. But a threshold that failed to PARSE is None, and writing
+    # None here re-creates the blank cell this function exists to prevent: it scores zero with
+    # certainty, exactly like a wrong answer, so there is never a reason to emit one. Fall back
+    # to the median of whatever the same clause id computed for other borrowers, then to 0.0.
+    computed_by_cid: dict[str, list[float]] = {}
+    for _sc, covs in answers.items():
+        for _cid, cell in covs.items():
+            if isinstance(cell.get("actual"), (int, float)):
+                computed_by_cid.setdefault(_cid, []).append(float(cell["actual"]))
     for sc, cid, spec in unresolved:
         thr = (spec or {}).get("threshold")
-        answers[sc][cid] = {"status": majority, "actual": thr, "evidence_txn_id": None}
         why = "no clause parsed" if spec is None else "metric not computable from the ledger"
+        if not isinstance(thr, (int, float)):
+            peers = computed_by_cid.get(cid) or []
+            thr = round(median(peers), 2) if peers else 0.0
+            why += f"; threshold did not parse, using {'peer median' if peers else '0.0'}"
+        answers[sc][cid] = {"status": majority, "actual": thr, "evidence_txn_id": None}
         print(f"   {sc:>4} {cid}  <- {majority}, actual={thr}  ({why})")
 
 
@@ -226,8 +254,18 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
                     rates = ledgermod.load_fx(fx_path)
                     print(f"FX: {len(rates)} rates loaded from {fx_path}")
                 except Exception as e:
-                    print(f"!! FX table {fx_path} failed to load ({e}); non-USD rows "
-                          f"will be counted 1:1.")
+                    print(f"!! FX table {fx_path} failed to load ({e}); falling back to the "
+                          f"rates disclosed in the documents.")
+            if rates is None and any((t.currency or "USD").upper() != "USD" for t in txns):
+                # No FX file — which is the real archive's situation. The rate is in the
+                # documents («по курсу, раскрытому аудитором»), stated per borrower, so read
+                # it from there rather than counting EUR 1:1 and understating it by 8–16%.
+                try:
+                    from . import fx as fxmod
+                    rates = fxmod.rates_by_scenario(dm) or None
+                except Exception as e:
+                    print(f"!! could not read FX rates from the documents ({str(e)[:80]}); "
+                          f"non-USD rows will be counted 1:1.")
             missing = ledgermod.convert_fx(txns, rates)
             txns_by_sc = ledgermod.by_scenario(txns)
             _report_ledger(txns, txns_by_sc, rates, missing)
@@ -237,13 +275,20 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
 
     answers: dict[str, dict] = {}
     unresolved: list[tuple[str, str, dict | None]] = []
+    # WHICH cells we owe comes from the template, never from a constant. The practice release
+    # was 12 borrowers x {6.1,6.2,6.3}; the real one is 27 borrowers, three of them carrying a
+    # 6.4 and one (J4) whose covenants are numbered under Article 5. A hardcoded triple would
+    # invent 6.2/6.3 for J4 and silently omit four cells that were asked for — and an omitted
+    # cell scores the same as a wrong one.
+    template = config.submission_template()
     for sc, acc in config.SCENARIO_TO_ACC.items():
-        answers[sc] = {"6.1": empty_cell(), "6.2": empty_cell(), "6.3": empty_cell()}
+        cids = template.get(sc) or ["6.1", "6.2", "6.3"]
+        answers[sc] = {cid: empty_cell() for cid in cids}
         covs = specs.get(sc, {}).get("covenants", {})
         if not (ledger_path and sc in txns_by_sc):
             # No ledger, or none of its rows resolved to this borrower. Nothing is computable,
-            # but the cells are still owed an answer — hand all three to the guess pass.
-            unresolved.extend((sc, cid, covs.get(cid)) for cid in ("6.1", "6.2", "6.3"))
+            # but the cells are still owed an answer — hand them to the guess pass.
+            unresolved.extend((sc, cid, covs.get(cid)) for cid in cids)
             continue
         txns = txns_by_sc[sc]
         rcs = reclass.for_account(acc, dm)
@@ -293,7 +338,7 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
             inner = catf.base
             catf.base = lambda t: (RELATED_PARTY if classifier.looks_related_party(t)
                                    else inner(t))
-        for cid in ("6.1", "6.2", "6.3"):
+        for cid in cids:
             spec = covs.get(cid)
             if not spec:
                 # no clause parsed at all — still owed an answer, so guess it below

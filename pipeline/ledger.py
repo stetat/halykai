@@ -22,8 +22,15 @@ from pathlib import Path
 
 from .config import ACC_TO_SCENARIO, SCENARIO_TO_ACC
 
-TXN_RE = re.compile(r"TXN-([A-Za-z0-9]+)-\d+", re.I)
-ACC_RE = re.compile(r"ACC-?\d+", re.I)
+# The scenario is the segment straight after "TXN-", whatever follows it. The practice release
+# was always TXN-<scenario>-<digits>, so the old pattern demanded digits next — and the real
+# dataset's scenario KC numbers its rows TXN-KC-CAP-29 / TXN-KC-FIN-19. Three segments, no
+# match, and all 63 of that borrower's rows resolved to nothing: three cells silently lost.
+TXN_RE = re.compile(r"TXN-([A-Za-z0-9]+)-", re.I)
+# The real dataset's scenario KC sits on account `TELE-4471`, so an id is <letters>-<digits>,
+# not necessarily "ACC". Anchored at both ends against the whole field so a description
+# containing a code cannot masquerade as the account.
+ACC_RE = re.compile(r"[A-Za-z]{2,8}-?\d{3,6}", re.I)
 _KNOWN_SCENARIOS = {s.upper(): s for s in SCENARIO_TO_ACC}
 
 # Encodings to try, in order. utf-8 is tried first because cp1251 text almost always
@@ -183,7 +190,7 @@ def _to_float(s: str) -> float:
     return -v if neg else v
 
 
-def discover_scenario_map(txns: list) -> dict[str, str]:
+def discover_scenario_map(txns: list, allowed: set[str] | None = None) -> dict[str, str]:
     """Read the real scenario<->account pairs out of the ledger itself.
 
     `_scenario_of` can only resolve scenarios already in the hardcoded map, so a dataset with
@@ -191,15 +198,25 @@ def discover_scenario_map(txns: list) -> dict[str, str]:
     their three cells are never computed — a silent zero on every affected borrower. But the
     pairing is right there in the data: txn_id carries the scenario and the row carries the
     account. Pair them by majority vote so a handful of malformed rows cannot rename a
-    borrower, and let `config.set_scenario_map` adopt the result."""
+    borrower, and let `config.set_scenario_map` adopt the result.
+
+    `allowed` is the set of scenario ids the submission template asks for. Without it every
+    txn_id prefix looks like a scenario, and the real ledger carries 800 counterparty rows whose
+    ids are numeric (TXN-9170-0002 on ACC-9170) — unconstrained they produced 575 phantom
+    "borrowers", each of which would then be solved for and emitted. The template is the
+    authority on which scenarios exist; the ledger is the authority on which account each sits.
+    """
     pairs: dict[str, Counter] = defaultdict(Counter)
     for t in txns:
         m = TXN_RE.search(getattr(t, "txn_id", "") or "")
         a = ACC_RE.search((getattr(t, "account_id", "") or "").strip())
         if not (m and a):
             continue
+        sc = m.group(1).upper()
+        if allowed is not None and sc not in allowed:
+            continue
         acc = a.group(0).upper().replace("ACC", "ACC-").replace("--", "-")
-        pairs[m.group(1).upper()][acc] += 1
+        pairs[sc][acc] += 1
     return {sc: c.most_common(1)[0][0] for sc, c in pairs.items() if c}
 
 
@@ -344,7 +361,11 @@ def convert_fx(txns: list[Txn], rates: dict | None = None) -> list[str]:
         if ccy == "USD":
             t.amount_usd = t.amount
             continue
-        rate = rates.get((ccy, t.date)) or rates.get(ccy)
+        # Per-BORROWER first: the real corpus discloses 1.08 for one borrower and 1.14 for
+        # another over the same period, so a single global rate is wrong for somebody by
+        # construction. Then per-date, then the currency-wide fallback.
+        rate = (rates.get((ccy, t.scenario)) if t.scenario else None) \
+            or rates.get((ccy, t.date)) or rates.get(ccy)
         if rate:
             t.amount_usd = t.amount * rate
         else:

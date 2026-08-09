@@ -5,3 +5,6 @@ __pycache__/
 submission.json
 covenant_specs.json
 docmap.json
+dataset/real/
+submission_keyword.json
+submission_hybrid.json

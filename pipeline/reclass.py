@@ -31,12 +31,20 @@ _SUPERSEDES_RE = re.compile(r"замен\w+\s+любые\s+промежуточ�
 # ACC-7809) would silently void a borrower's only reclassification data.
 _RECLASS_SECTION_RE = re.compile(r"замен\w+\s+любые\s+промежуточн|переклассифиц", re.I)
 
+# The sentence body is written as an UNROLLED loop — `[^.]*(?:\.(?=\d)[^.]*)*` rather than
+# `(?:[^.]|\.(?=\d))*`. The two match the same language, but the second asks the engine to make
+# a per-character choice and record a backtrack point for every one of them, so a failed
+# terminator re-scans the whole document. Against the real corpus's 22,000-character contracts
+# that cost 45 seconds per borrower — 20 minutes for a 27-borrower run, producing no output and
+# no error, which reads exactly like a hang. The unrolled form consumes runs of non-dots in one
+# step and is linear. (Python 3.9 has no atomic groups or possessive quantifiers.)
+#
 # One reclassification = one sentence beginning at a TXN id. The sentence terminator is
 # a period NOT followed by a digit: amounts like "($418,204.37)" contain periods, and
 # treating those as sentence ends truncated the clause before "переклассифицирована",
 # so every reclassification carrying a dollar amount parsed as {from:'К', to:None} and
 # silently became "not applied" -> no evidence anywhere.
-RECLASS_RE = re.compile(r"(TXN-[A-Za-z0-9-]+)((?:[^.]|\.(?=\d))*)\.(?!\d)", re.S)
+RECLASS_RE = re.compile(r"(TXN-[A-Za-z0-9-]+)([^.]*(?:\.(?=\d)[^.]*)*)\.(?!\d)", re.S)
 _FROM_RE = re.compile(r"первоначальн\w*\s+(?:учтённ\w+|учтен\w+|отражённ\w+|отражен\w+|"
                       r"классифицирован\w*)?\s*как\s+([^,(]+)", re.I)
 _TO_RE = re.compile(r"(?:пере|ре)классифицирован\w*.*?\bкак\s+([^,(]+)", re.I | re.S)
@@ -52,14 +60,14 @@ _AMT_RE = re.compile(r"\$\s*([0-9][0-9\s.,]*)")
 _AMT_CP_RE = re.compile(
     r"Сумма\s+в\s+размере\s*\$\s*([0-9][0-9\s.,]*)\s*,\s*"
     r"выплаченн\w*\s+контрагенту\s+([^,]{3,70}?)\s*,"
-    r"((?:[^.]|\.(?=\d))*)\.(?!\d)", re.S | re.I)
+    r"([^.]*(?:\.(?=\d)[^.]*)*)\.(?!\d)", re.S | re.I)
 
 # Covenant testing is period-bound: "Выручка признаётся в том ковенантном периоде, в котором
 # фактически оказаны услуги, независимо от даты счёта-фактуры." A 2025-dated invoice for work
 # performed in 2026 belongs to neither the numerator nor the denominator of a 2025 covenant, so
 # the transaction must leave the period entirely — this is an EXCLUSION, not a reclassification.
 _CUTOFF_RE = re.compile(
-    r"(TXN-[A-Za-z0-9-]+)((?:[^.]|\.(?=\d))*?)"
+    r"(TXN-[A-Za-z0-9-]+)([^.]{0,600}?(?:\.(?=\d)[^.]{0,600}?)*?)"
     r"оказанн\w*\s+в\s+период\s+с\s+(\d{4})-\d{2}-\d{2}\s+по\s+(\d{4})-", re.S | re.I)
 COVENANT_YEAR = "2025"
 

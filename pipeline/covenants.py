@@ -10,9 +10,14 @@ import re
 from . import config, docmap, pdftext, gemini
 
 # grab clause 6.x text up to the next clause / article heading
+# Not every borrower's covenants live in Article 6: J4's are numbered 5.1/5.2/5.3, and X1..X3
+# carry a fourth clause 6.4. The old pattern accepted only 6.[123], so J4 parsed to zero
+# clauses (3 empty cells) and every 6.4 was swallowed into 6.3's text, changing 6.3's metric.
+# Russian «Пункт N.N» and English «Section N.N» — one borrower's contract is entirely English.
+_CLAUSE_HEAD = r"(?:Пункт|Section)\s+[56]\.\d\b"
 CLAUSE_RE = re.compile(
-    r"(Пункт\s+6\.[123]\b.*?)(?=Пункт\s+6\.[123]\b|Стать[яи]\s+7|\Z)",
-    re.S,
+    rf"({_CLAUSE_HEAD}.*?)(?={_CLAUSE_HEAD}|Стать[яи]\s+[78]|Article\s+(?:VI|VII|7|8)\b|\Z)",
+    re.S | re.I,
 )
 
 SYSTEM = (
@@ -41,12 +46,24 @@ PROMPT_TMPL = """Проанализируй пункт кредитного ко
 
 
 # --- deterministic operator/threshold extraction (no LLM, exact) ----------------------
-_DOLLAR_NUM = r"\$\s*([0-9][0-9\s.,]*[0-9])"
+# Money, in the format the contracts actually print it: «$400,000.00». The old pattern allowed
+# SPACES inside the number (`[0-9\s.,]*`) and was greedy, so «...не превышал $400,000.00. 5» —
+# a threshold followed by a page number — captured "400,000.00. 5", which parses to nothing at
+# all. The cell then had no threshold, and a cell with no threshold has no fallback `actual`
+# either, so it shipped blank. Blank scores exactly what wrong scores.
+_DOLLAR_NUM = r"\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"
+# «не превышали 80 процентов совокупной выручки» — a ratio stated as a percentage, with neither
+# a «N.NNx» form nor a «$» amount. Three borrowers' clauses are written this way.
+_PERCENT_RE = re.compile(r"([0-9]+(?:[.,][0-9]+)?)\s*(?:%|процент\w*|percent)", re.I)
 _RATIO_X = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*x\b")   # 0.42x / 1.70x / 9.00x
 # floor covenants (metric must stay >= T): "не менее", "снижения ... ниже", "не ниже"
-_FLOOR = re.compile(r"не\s+менее|не\s+ниже|не\s+меньше|снижени\w*|ниже\s+велич|минимальн", re.I)
+_FLOOR = re.compile(r"не\s+менее|не\s+ниже|не\s+меньше|снижени\w*|ниже\s+велич|минимальн"
+                    r"|not\s+less\s+than|no\s+less\s+than|at\s+least|minimum|shall\s+maintain",
+                    re.I)
 # ceiling covenants (metric must stay <= T): "не превышал", "составили более", "не более"
-_CEIL = re.compile(r"превыш\w*|не\s+более|не\s+выше|составил\w*\s+более|максим\w*|более\s+0", re.I)
+_CEIL = re.compile(r"превыш\w*|не\s+более|не\s+выше|составил\w*\s+более|максим\w*|более\s+0"
+                   r"|shall\s+not\s+permit|shall\s+not\s+exceed|not\s+to\s+exceed|maximum"
+                   r"|no\s+greater\s+than", re.I)
 
 
 def _to_number(s: str) -> float | None:
@@ -76,13 +93,20 @@ def parse_threshold(clause: str) -> dict:
         out["operator"] = "<="
 
     ratio_m = _RATIO_X.search(clause)
-    dollar_ms = re.findall(_DOLLAR_NUM, clause)
+    dollar_ms = [d for d in re.findall(_DOLLAR_NUM, clause) if _to_number(d) is not None]
     if ratio_m:
         out["threshold"], out["unit"] = _to_number(ratio_m.group(1)), "ratio"
         if dollar_ms:  # a $ amount alongside a ratio limit = springing activation trigger
             out["springing_trigger_usd"] = _to_number(dollar_ms[0])
     elif dollar_ms:
         out["threshold"], out["unit"] = _to_number(dollar_ms[0]), "usd"
+    else:
+        # A percentage IS a ratio: «не превышали 80 процентов совокупной выручки» is 0.80x.
+        pct = _PERCENT_RE.search(clause)
+        if pct:
+            v = _to_number(pct.group(1))
+            if v is not None:
+                out["threshold"], out["unit"] = v / 100.0, "ratio"
     return out
 
 
@@ -91,7 +115,7 @@ def clause_texts(contract_name: str) -> dict[str, str]:
     text = pdftext.extract_text(path)
     out: dict[str, str] = {}
     for chunk in CLAUSE_RE.findall(text):
-        m = re.match(r"Пункт\s+(6\.[123])", chunk)
+        m = re.match(r"(?:Пункт|Section)\s+([56]\.\d)", chunk, re.I)
         if m:
             out[m.group(1)] = re.sub(r"\s+", " ", chunk).strip()
     return out

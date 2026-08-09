@@ -69,6 +69,40 @@ class Report:
 
 
 # --- 1. preflight ----------------------------------------------------------------------
+def adopt_ledger_map(rep: Report, ledger: str | None) -> None:
+    """Let the LEDGER name the borrowers before any document is classified.
+
+    Order matters and it is not obvious. `docmap` routes a document by the account ids it
+    mentions, and the pattern it matches with is built from the current scenario map — so on a
+    dataset whose accounts are not the built-in ones, classifying first means routing against
+    the wrong ids. The real dataset makes this concrete: scenario KC sits on `TELE-4471`, which
+    no ACC-#### pattern can find, so its documents would be filed under no borrower at all."""
+    if not ledger:
+        return
+    try:
+        from . import ledger as ledgermod
+        txns = ledgermod.load(ledger)
+        allowed = set(config.submission_template()) or None
+        found = ledgermod.discover_scenario_map(txns, allowed=allowed)
+    except Exception as e:
+        rep.warn(f"could not pre-read the ledger for the scenario map ({str(e)[:70]})")
+        return
+    if not found:
+        rep.fail("no scenario<->account pair could be read from the ledger — check "
+                 "ledger.TXN_RE against the real txn_id format")
+        return
+    config.set_scenario_map(found)
+    from . import ledger as ledgermod2
+    ledgermod2.refresh_known_scenarios()
+    wanted = set(config.submission_template())
+    missing = sorted(wanted - set(found))
+    if missing:
+        rep.fail(f"{len(missing)} template scenario(s) have NO rows in the ledger: {missing} "
+                 f"— every one of their cells will be a guess")
+    else:
+        rep.ok(f"ledger names {len(found)} borrowers, matching the template exactly")
+
+
 def preflight(rep: Report) -> dict:
     print("\n" + "=" * 78)
     print("1. PREFLIGHT — did the documents actually load?")
@@ -87,28 +121,37 @@ def preflight(rep: Report) -> dict:
                + (f" (nested under {nested})" if nested else " (flat)"))
 
     dm = docmap.build(save=True)
-    n_docs, n_accs = len(dm["docs"]), len(dm["by_acc"])
-    if n_accs == 0:
+    # Report on the BORROWERS, not on every account id a document happens to mention. The real
+    # corpus names ~550 counterparty accounts (ACC-9xxx) in passing; counting those as
+    # "borrowers routed" buries the number that matters under two screens of noise.
+    borrowers = [a for a in config.SCENARIO_TO_ACC.values() if a]
+    n_docs = len(dm["docs"])
+    routed = [a for a in borrowers if a in dm["by_acc"]]
+    if not routed:
         rep.fail(f"{n_docs} documents classified but ZERO borrowers routed — check the archive")
         return dm
-    rep.ok(f"{n_docs} documents classified, {n_accs} borrowers routed")
+    if len(routed) < len(borrowers):
+        rep.fail(f"{len(borrowers) - len(routed)} borrower(s) have NO documents at all: "
+                 f"{sorted(set(borrowers) - set(routed))}")
+    else:
+        rep.ok(f"{n_docs} documents classified; all {len(borrowers)} borrowers have documents")
 
     missing = dm["accounts_without_contract"]
     if missing:
         rep.fail(f"{len(missing)} borrower(s) with NO live contract: {missing} "
                  f"— 3 cells each will be empty")
     else:
-        rep.ok(f"live contract selected for all {n_accs} borrowers")
+        rep.ok(f"live contract selected for all {len(borrowers)} borrowers")
 
     quarantined = sum(1 for d in dm["docs"].values() if d["outdated"] and d["has_covenants"])
     rep.ok(f"{quarantined} outdated contract(s) quarantined (the version trap)")
 
-    no_rp = [a for a in dm["by_acc"] if not reclass.related_parties(a, dm)]
+    no_rp = [a for a in borrowers if not reclass.related_parties(a, dm)]
     if no_rp:
-        rep.warn(f"{len(no_rp)} borrower(s) with no related-party list: {no_rp} "
-                 f"— their 6.3 cells will report $0")
+        rep.warn(f"{len(no_rp)}/{len(borrowers)} borrower(s) with no related-party list: "
+                 f"{sorted(no_rp)} — any related-party cell of theirs reports $0")
     else:
-        rep.ok(f"related parties resolve for all {n_accs} borrowers")
+        rep.ok(f"related parties resolve for all {len(borrowers)} borrowers")
 
     try:
         untranscribed = pdfimages.untranscribed_image_docs()
@@ -264,6 +307,7 @@ def run(ledger: str | None = None, fx: str | None = None, ship: str = "keyword",
     print("=" * 78)
     print(f"ledger={ledger or '(none — skeleton only)'}  fx={fx or '(none)'}  ship={ship}")
 
+    adopt_ledger_map(rep, ledger)
     preflight(rep)
     if rep.failures:
         print("\n!! preflight failed — fix this before spending any quota. "
