@@ -34,6 +34,7 @@ They differ on **32 of 84 cells**. Which one ships and why is in [`REPRODUCE.md`
 - **Python 3.9+** — the pipeline is **stdlib only**. No `pip install`, nothing to pin.
 - **`pdftotext`** (from poppler) — the single external binary. `brew install poppler`.
 - A Gemini API key in `.env` — **only if** you want the hybrid run. The shipped file needs none.
+  Copy [`.env.example`](.env.example) to `.env` and fill it in; `.env` itself is gitignored.
 
 ### The one command
 
