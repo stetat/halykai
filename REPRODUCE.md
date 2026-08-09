@@ -172,7 +172,38 @@ DATASET_DIR=dataset/real/agentic-bank-hidden python -m pipeline.fx   # show ever
 
 ---
 
-## 7. If a number moves between runs
+## 7. The keyword-vs-hybrid decision on THIS archive (read before shipping hybrid)
+
+Both were run. They differ on **32 of 84 cells, 8 of them status flips** — far more than the
+practice release's 4-of-36, so this is a real decision rather than a formality.
+
+| | keyword (shipped) | hybrid |
+|---|---|---|
+| cells | 84/84 valid | 84/84 valid |
+| BREACH verdicts | 6 | 14 |
+| evidence ids | 2 | 11 |
+
+Almost every flip is a **6.3 related-party cell** where keyword reports `0.00` and hybrid finds
+$260k–$300k. That is not the model being cleverer — it is the two paths answering *different
+questions*. Related-party membership is an **identity** test against the KYC dossier, and the
+contracts say so in as many words: «Отнесение контрагента к аффилированным лицам определяется
+… **а не назначением платежа**». The keyword path applies exactly that test and returns $0 for
+the 12 borrowers whose dossier names no counterparty. The model, given no list, infers
+membership from the payment description — the one signal the contract explicitly rules out.
+
+So `submission.json` ships the **keyword** baseline. It is the contract-faithful reading, it is
+deterministic, and its zeros are honest.
+
+**That is a defensible call, not a certain one.** If a dossier exists that we failed to parse,
+a $0 is as wrong as a guess. The open lead is §5's untranscribed images — three of them belong
+to borrowers with no related-party list. `python -m pipeline.cli ocr` transcribes them; verified
+values in `image_facts.json` always win over model output. If a real ownership list turns up
+there, re-run and the keyword path will find those payments by identity, which is the answer
+both paths should have been giving.
+
+---
+
+## 8. If a number moves between runs
 
 Work down this list:
 
