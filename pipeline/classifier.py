@@ -326,6 +326,31 @@ def classify_batch(txns, related_parties=None, model=None, chunk=150) -> dict[st
 classify_batch.last_stats = {}
 
 
+# Once the API is unreachable it stays unreachable for the rest of the run — an expired key, an
+# exhausted quota, no network. Retrying per borrower would pay the full HTTP timeout twelve
+# times over (180s each, times four retries inside gemini.generate), turning a degraded run
+# into a hung one. Two consecutive failures and we stop asking; the deterministic answer was
+# already in place, so nothing is lost but the waiting.
+_BREAKER = {"consecutive": 0, "limit": 2}
+
+
+def _breaker_open() -> bool:
+    return _BREAKER["consecutive"] >= _BREAKER["limit"]
+
+
+def _breaker_trip() -> None:
+    _BREAKER["consecutive"] += 1
+
+
+def _breaker_reset() -> None:
+    _BREAKER["consecutive"] = 0
+
+
+def reset_breaker() -> None:
+    """Re-arm between runs (and in tests)."""
+    _BREAKER["consecutive"] = 0
+
+
 def classify_hybrid(txns, related_parties=None, model=None, chunk=150) -> dict[str, str]:
     """Deterministic first; spend the LLM only on rows the vocabulary could not decide.
 
@@ -357,13 +382,18 @@ def classify_hybrid(txns, related_parties=None, model=None, chunk=150) -> dict[s
     stats["asked"] = len(uncertain)
     for i in range(0, len(uncertain), chunk):
         part = uncertain[i:i + chunk]
+        if _breaker_open():
+            stats["errors"].append("circuit breaker open — not calling")
+            continue
         try:
             raw = gemini.generate(_prompt(part, related),
                                   model=model or config.MODEL_FLASH, system=_SYSTEM,
                                   json_out=True, temperature=0.0)
             mp = _parse(raw)
+            _breaker_reset()
         except Exception as e:
             stats["errors"].append(str(e)[:80])
+            _breaker_trip()
             continue                              # keep the deterministic answer
         for t in part:
             if mp.get(t.txn_id) in _VALID:

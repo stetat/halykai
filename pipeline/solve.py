@@ -264,9 +264,15 @@ def solve(ledger_path: str | None = None, fx_path: str | None = None,
                 cat_map = fn(txns, related_parties=rps)
                 st = fn.last_stats
                 if classifier_mode == "hybrid":
+                    errs = st.get("errors") or []
+                    if any("circuit breaker" in e for e in errs):
+                        note = " — API unreachable, skipped (using keywords)"
+                    elif errs:
+                        note = f" ({len(errs)} call(s) failed; keyword answers kept)"
+                    else:
+                        note = ""
                     print(f"   {sc}: asked Gemini about {st['asked']}/{len(txns)} rows, "
-                          f"{st['llm_used']} answers used"
-                          + (f" ({len(st['errors'])} call(s) failed)" if st["errors"] else ""))
+                          f"{st['llm_used']} answers used{note}")
                 base = classifier.make_base_classifier(cat_map)
                 catf = Categorizer(base, rcs, related_parties=set(),
                                    unrestricted_parties=unrestricted,

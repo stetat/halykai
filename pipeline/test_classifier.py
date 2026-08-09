@@ -183,12 +183,32 @@ def run_hybrid_routing():
     finally:
         gemini.generate = real
 
-    for label, cond in (("hybrid asks the LLM only about undecided rows", only_murky),
+    # A dead API stays dead for the rest of the run. Without a breaker each borrower pays the
+    # full HTTP timeout — 180s, times four retries inside gemini.generate, times twelve
+    # borrowers — turning a degraded run into a hung one.
+    classifier.reset_breaker()
+    calls = {"n": 0}
+
+    def always_fails(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("network unreachable")
+    gemini.generate = always_fails
+    try:
+        for _ in range(6):
+            classifier.classify_hybrid([murky])
+    finally:
+        gemini.generate = real
+        classifier.reset_breaker()
+    breaker = calls["n"] <= 2
+
+    for label, cond in ((f"the breaker stops calling a dead API ({calls['n']} calls in 6 "
+                         f"borrowers)", breaker),
+                        ("hybrid asks the LLM only about undecided rows", only_murky),
                         (f"hybrid keeps the deterministic answer ({st['deterministic']} kept)", kept),
                         ("hybrid applies the LLM answer to the undecided row", used),
                         ("hybrid degrades to keywords when the API fails", safe)):
         print(f"{'ok ' if cond else 'FAIL'} {label}")
-    return only_murky and kept and used and safe
+    return only_murky and kept and used and safe and breaker
 
 
 def run():
