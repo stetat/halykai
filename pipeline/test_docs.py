@@ -88,13 +88,13 @@ check("B1: the superseded draft's TXN-B1-0023 reclassification is not applied",
 # The trap underneath that one: the final report is recognised BY the sentence "Настоящий отчёт
 # заменяет любые промежуточные ведомости", which contains "промежуточн" — so a bare interim
 # keyword search reads the superseding document as the superseded one.
-_final = pdftext.extract_text(config.DATASET / "46587c5f8e49.pdf")
+_final = pdftext.extract_text(config.dataset_path("46587c5f8e49.pdf"))
 check("the final report is not misread as an interim worksheet",
       not ((not reclass._SUPERSEDES_RE.search(_final))
            and reclass.INTERIM_RE.search(_final)))
 check("the interim worksheet is still recognised as interim",
       bool(reclass.INTERIM_RE.search(
-          pdftext.extract_text(config.DATASET / "2d42722d9dec.pdf"))))
+          pdftext.extract_text(config.dataset_path("2d42722d9dec.pdf")))))
 
 # Borrowers whose reclassifications come from a final report must be untouched by the rule.
 check("P9's final-report reclassification survives the interim/final split",
@@ -205,7 +205,7 @@ for sc, acc in config.SCENARIO_TO_ACC.items():
 # elsewhere in the contract silently OVERWRITES the real clause (last write wins).
 for sc, acc in config.SCENARIO_TO_ACC.items():
     contract = _DM["current_contract"][acc]
-    text = pdftext.extract_text(config.DATASET / contract)
+    text = pdftext.extract_text(config.dataset_path(contract))
     ids = [m.group(1) for m in
            (re.match(r"Пункт\s+(6\.[123])", ch) for ch in covenants.CLAUSE_RE.findall(text))
            if m]
@@ -220,6 +220,61 @@ for sc, acc in config.SCENARIO_TO_ACC.items():
         stored = _specs[sc]["covenants"][cid]["raw_text"]
         check(f"{sc} {cid}: raw_text is not truncated", stored == ctext,
               f"stored {len(stored)} of {len(ctext)} chars")
+
+# --- the archive may not extract flat -----------------------------------------------------
+# The practice release puts every PDF directly in dataset/. The spec's dataset table does not
+# promise that: it says the documents arrive inside a `documents/` folder. Discovery used to be
+# `DATASET.iterdir()` filtered by is_file(), which skips a subdirectory in silence — against a
+# nested archive that classified ONE document, resolved ZERO accounts and wrote 36 empty cells,
+# with no exception and no `!!` line naming the cause. Total loss, quietly.
+#
+# So the same corpus is re-read through a nested layout and must come out identical.
+def _nested_archive_reads_the_same() -> None:
+    import shutil
+    import tempfile
+    from . import retrieval
+
+    flat_docs, flat_accs = len(_DM["docs"]), len(_DM["by_acc"])
+    flat_contracts = sum(1 for v in _DM["current_contract"].values() if v)
+    real_dataset, real_key = config.DATASET, config.ANSWER_KEY
+
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="nested-archive-"))
+    try:
+        docs_dir = tmp / "dataset" / "documents"
+        docs_dir.mkdir(parents=True)
+        for p in config.dataset_files():
+            shutil.copy2(p, docs_dir / p.name)
+        shutil.move(str(docs_dir / "submission_template.json"),
+                    str(tmp / "dataset" / "submission_template.json"))
+
+        config.DATASET = tmp / "dataset"
+        config.ANSWER_KEY = config.DATASET / "submission_template.json"
+        config.reset_dataset_cache()
+        retrieval.reset()
+
+        nested = docmap.build(save=False)
+        n_contracts = sum(1 for v in nested["current_contract"].values() if v)
+        check("nested archive: every document is still found",
+              len(nested["docs"]) == flat_docs,
+              f"{len(nested['docs'])} vs {flat_docs} flat")
+        check("nested archive: every borrower is still routed",
+              len(nested["by_acc"]) == flat_accs,
+              f"{len(nested['by_acc'])} vs {flat_accs} flat")
+        check("nested archive: every live contract is still selected",
+              n_contracts == flat_contracts, f"{n_contracts} vs {flat_contracts} flat")
+        check("nested archive: related parties still resolve 12/12",
+              all(reclass.related_parties(a, nested)
+                  for a in config.SCENARIO_TO_ACC.values()))
+        check("nested archive: retrieval still indexes the corpus",
+              retrieval.index().n > 200, f"{retrieval.index().n} passages")
+    finally:
+        config.DATASET, config.ANSWER_KEY = real_dataset, real_key
+        config.reset_dataset_cache()
+        retrieval.reset()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+_nested_archive_reads_the_same()
 
 print()
 if FAILURES:

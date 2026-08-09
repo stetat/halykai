@@ -252,7 +252,7 @@ def build_index(dm: dict | None = None, verbose: bool = False) -> Index:
     passages: list[Passage] = []
     for name, d in corpus_docs(dm):
         try:
-            text = pdftext.extract_text(config.DATASET / name)
+            text = pdftext.extract_text(config.dataset_path(name))
         except Exception as e:                 # a single unreadable file must not cost the index
             if verbose:
                 print(f"!! retrieval: {name} unreadable ({str(e)[:60]}); skipped")
@@ -283,10 +283,9 @@ def index(dm: dict | None = None) -> Index:
 
 def _corpus_fingerprint() -> str:
     h = hashlib.sha256()
-    for p in sorted(config.DATASET.iterdir()):
-        if p.is_file():
-            h.update(p.name.encode())
-            h.update(str(p.stat().st_size).encode())
+    for p in config.dataset_files():
+        h.update(p.name.encode())
+        h.update(str(p.stat().st_size).encode())
     return h.hexdigest()[:16]
 
 

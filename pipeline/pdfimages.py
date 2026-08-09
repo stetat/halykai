@@ -70,9 +70,7 @@ def images_in(pdf: Path) -> list[tuple[int, int, int, bytes]]:
 def find_image_docs(min_pixels: int = 200_000) -> list[tuple[str, int]]:
     """Dataset files carrying images big enough to hold a table. [(name, n_images)]."""
     found = []
-    for p in sorted(config.DATASET.iterdir()):
-        if not p.is_file():
-            continue
+    for p in config.dataset_files():
         imgs = [i for i in images_in(p) if i[0] * i[1] >= min_pixels]
         if imgs:
             found.append((p.name, len(imgs)))
@@ -85,7 +83,7 @@ def dump(out_dir: Path | None = None, min_pixels: int = 200_000) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for name, _ in find_image_docs(min_pixels):
-        for i, (w, h, _c, png) in enumerate(images_in(config.DATASET / name)):
+        for i, (w, h, _c, png) in enumerate(images_in(config.dataset_path(name))):
             if w * h < min_pixels:
                 continue
             p = out_dir / f"{name}.img{i}.png"
@@ -136,7 +134,8 @@ def transcribe(doc: str, model: str | None = None, min_pixels: int = 200_000) ->
     the pictures by eye. This exists for the images an event-day dataset carries that nobody has
     seen, where the alternative is not a worse answer but no answer at all."""
     from . import gemini
-    imgs = [png for w, h, _c, png in images_in(config.DATASET / doc) if w * h >= min_pixels]
+    imgs = [png for w, h, _c, png in images_in(config.dataset_path(doc))
+            if w * h >= min_pixels]
     if not imgs:
         return {}
     raw = gemini.generate(_VISION_PROMPT, model=model, images=imgs,

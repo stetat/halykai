@@ -87,7 +87,7 @@ def parse_threshold(clause: str) -> dict:
 
 
 def clause_texts(contract_name: str) -> dict[str, str]:
-    path = config.DATASET / contract_name
+    path = config.dataset_path(contract_name)
     text = pdftext.extract_text(path)
     out: dict[str, str] = {}
     for chunk in CLAUSE_RE.findall(text):

@@ -70,7 +70,17 @@ def classify(path: Path) -> Doc:
 
 
 def build(save: bool = True) -> dict:
-    docs = [classify(p) for p in sorted(config.DATASET.iterdir()) if p.is_file()]
+    files = config.dataset_files()
+    if not files:
+        print(f"!! {config.DATASET} contains no files. Every cell will be empty.")
+    # The spec's dataset table says the PDFs arrive inside a `documents/` folder; this release
+    # extracted flat. Say which shape actually turned up, because "1 document classified" is
+    # otherwise indistinguishable from "the archive is empty".
+    nested = {p.parent.name for p in files if p.parent != config.DATASET}
+    if nested:
+        print(f"   dataset is nested — reading {len(files)} files from "
+              f"{sorted(nested)} as well as the root.")
+    docs = [classify(p) for p in files]
     by_acc: dict[str, dict] = {}
     for d in docs:
         if d.is_spec:            # never route the spec/key to a borrower

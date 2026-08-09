@@ -127,7 +127,7 @@ def period_exclusions(acc: str, dm: dict | None = None) -> set[str]:
     want = config.ACC_TO_SCENARIO.get(acc, "").upper()
     out: set[str] = set()
     for name in {n for names in groups.values() for n in names}:
-        text = pdftext.extract_text(config.DATASET / name)
+        text = pdftext.extract_text(config.dataset_path(name))
         for m in _CUTOFF_RE.finditer(text):
             txn, _, y_from, y_to = m.groups()
             parts = txn.split("-")
@@ -166,7 +166,7 @@ def for_account(acc: str, dm: dict | None = None) -> list[Reclass]:
     interim_rcs: dict = {}
     has_final = False
     for name in audit_docs:
-        text = pdftext.extract_text(config.DATASET / name)
+        text = pdftext.extract_text(config.dataset_path(name))
         interim = (not _SUPERSEDES_RE.search(text)) and bool(INTERIM_RE.search(text))
         target = interim_rcs if interim else final_rcs
         for rc in _parse_reclasses(text, want):
@@ -293,7 +293,7 @@ def related_parties(acc: str, dm: dict | None = None) -> set[str]:
     docs = groups.get("kyc", []) + groups.get("audits", []) + groups.get("other", [])
     parties: set[str] = set()
     for name in docs:
-        text = pdftext.extract_text(config.DATASET / name)
+        text = pdftext.extract_text(config.dataset_path(name))
         thr = _THRESHOLD_RE.search(text)
         if not thr:
             continue

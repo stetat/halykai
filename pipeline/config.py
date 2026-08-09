@@ -61,5 +61,57 @@ def set_scenario_map(mapping: dict[str, str]) -> None:
     ACC_TO_SCENARIO.clear()
     ACC_TO_SCENARIO.update({v: k for k, v in mapping.items()})
 
+# --- finding the dataset's files, wherever the archive put them ------------------------
+# The practice release extracts FLAT: every PDF sits directly in dataset/. The spec's own
+# dataset table does not promise that — it says the archive contains
+# «`documents/` — **Одна папка** со всеми PDF-документами датасета».
+#
+# Every discovery path here used to be `DATASET.iterdir()` filtered by `is_file()`, which skips
+# a subdirectory silently. Against a nested archive that classifies ONE document, resolves ZERO
+# accounts, selects ZERO contracts, and writes 36 empty cells — a total loss, with no exception
+# raised and no `!!` line that names the cause. So discovery walks the tree, and every module
+# resolves bare filenames through here rather than by joining DATASET itself.
+_IGNORED_DIRS = {"__MACOSX"}
+
+
+def dataset_files() -> list["Path"]:
+    """Every dataset file, at any depth, deterministically ordered.
+
+    Sorted by NAME, not by path, so the same archive gives the same order whether it extracted
+    flat or nested — several harnesses compare against recorded results and would otherwise
+    change answer only because a folder appeared."""
+    if not DATASET.exists():
+        return []
+    out = [p for p in DATASET.rglob("*")
+           if p.is_file()
+           and not p.name.startswith(".")            # .DS_Store; NB `_Thumbs.db` is a real
+           and not any(d in _IGNORED_DIRS for d in p.parts)]   # contract and must be kept
+    return sorted(out, key=lambda p: (p.name, str(p)))
+
+
+_PATH_CACHE: dict[str, "Path"] = {}
+
+
+def dataset_path(name: str) -> "Path":
+    """Resolve a bare dataset filename to its real location.
+
+    Documents are keyed by bare filename throughout the pipeline (`docmap` stores `d.name`,
+    everything downstream re-joins it). That join is what breaks on a nested archive, so it
+    happens exactly once, here."""
+    if not _PATH_CACHE or name not in _PATH_CACHE:
+        _PATH_CACHE.clear()
+        for p in dataset_files():
+            _PATH_CACHE.setdefault(p.name, p)
+    hit = _PATH_CACHE.get(name)
+    if hit is not None:
+        return hit
+    return DATASET / name          # let the caller raise a normal FileNotFoundError
+
+
+def reset_dataset_cache() -> None:
+    """Forget resolved paths (tests that point DATASET somewhere else need this)."""
+    _PATH_CACHE.clear()
+
+
 # The pre-filled template doubles as the answer key for this practice release.
-ANSWER_KEY = DATASET / "submission_template.json"
+ANSWER_KEY = dataset_path("submission_template.json")
