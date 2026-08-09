@@ -1,5 +1,22 @@
 # Handoff — what is left to perfect the model
 
+> **THE REAL ARCHIVE HAS ARRIVED** and lives in `dataset/real/agentic-bank-hidden/`.
+> Run it with `DATASET_DIR` set — see `REPRODUCE.md`, which is now the operative document:
+>
+> ```bash
+> DATASET_DIR=dataset/real/agentic-bank-hidden python -m pipeline.cli eventday \
+>     --ledger dataset/real/agentic-bank-hidden/master_ledger_2025.csv
+> ```
+>
+> Status: **GO** — 310 documents, 27/27 borrowers routed, 27/27 live contracts, 27/27
+> scenarios resolved, **84/84 cells computed**, every cell a valid status and a numeric
+> actual. Two open items: `B5 6.3` reports $0 related-party spend (its dossier names no
+> counterparty), and 10 image documents are untranscribed.
+>
+> Everything below about *12 borrowers and 36 cells* describes the PRACTICE release, which
+> still lives in `dataset/` and still runs by default when `DATASET_DIR` is unset. The
+> engineering lessons hold; the numbers do not transfer.
+
 Written 2026-08-09. Read this together with `README.md` (what the dataset is and how the
 pipeline works) and the answer to *"is it done?"* — the document half is done; the
 **transaction-classification half is the whole remaining risk**.
