@@ -131,6 +131,9 @@ degrades instead of crashing:
 
 ## Usage (run from project root; prefix `PYTHONUTF8=1` on Windows for console Cyrillic)
 ```
+python -m pipeline.cli eventday --ledger L.csv --fx FX.csv   # THE event-day command:
+      # preflight -> keyword baseline -> hybrid -> diff -> validate -> GO/NO-GO
+      # --no-llm spends no quota; --ship hybrid ships the model result instead
 python -m pipeline.cli check                    # verify Gemini key (1 call)
 python -m pipeline.cli map                       # docmap.json + current-contract table
 python -m pipeline.cli validate                  # bracket-check vs answer key (no API)

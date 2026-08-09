@@ -173,8 +173,21 @@ non-monotonic.
 
 ## 5. Event-day runbook (the real ledger + FX table arrive)
 
-The math is done. Event day is **ingestion + two data-dependent knobs**. Work in this order and
-do not skip step 1 — it is the only step that can silently cost every cell.
+**The whole runbook below is one command.** Run it first; only drop to the manual phases if it
+reports NO-GO or you need to tune something.
+
+```bash
+python -m pipeline.cli eventday --ledger master_ledger_2025.csv --fx FX.csv
+```
+
+It runs preflight → keyword baseline → hybrid → diff → validate and ends on GO or NO-GO. It
+ships the keyword baseline by default and keeps it at `submission_keyword.json`; add
+`--ship hybrid` once you have read the diff, or `--no-llm` to spend no quota at all. Exit code
+is 1 on NO-GO, so it also works in a script.
+
+The math is done. Event day is **ingestion + two data-dependent knobs**. The phases below are
+what that command automates, in the same order — do not skip phase 1, it is the only step that
+can silently cost every cell.
 
 ### Phase 1 — prove the data loaded (5 minutes, no API)
 

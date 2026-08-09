@@ -1,0 +1,211 @@
+{
+  "team": "darkhan",
+  "contact_email": "adarhan76@gmail.com",
+  "model": "gemini-pro-latest",
+  "answers": {
+    "P1": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 0.42,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 7100000.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 450000.0,
+        "evidence_txn_id": null
+      }
+    },
+    "P2": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 1.2,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 3000000.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 0.03,
+        "evidence_txn_id": null
+      }
+    },
+    "P3": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 1.7,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 6500000.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 400000.0,
+        "evidence_txn_id": null
+      }
+    },
+    "P4": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 0.28,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 1800000.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 0.04,
+        "evidence_txn_id": null
+      }
+    },
+    "P5": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 9.0,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 7500000.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 260000.0,
+        "evidence_txn_id": null
+      }
+    },
+    "P6": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 0.08,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 3.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 1600000.0,
+        "evidence_txn_id": null
+      }
+    },
+    "P7": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 0.3,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 8700000.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 275000.0,
+        "evidence_txn_id": null
+      }
+    },
+    "P8": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 4000000.0,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 2100000.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 0.04,
+        "evidence_txn_id": null
+      }
+    },
+    "P9": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 0.15,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 6900000.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 225000.0,
+        "evidence_txn_id": null
+      }
+    },
+    "P10": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 0.2,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 5000000.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 0.05,
+        "evidence_txn_id": null
+      }
+    },
+    "B1": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 2.0,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 1500000.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 500000.0,
+        "evidence_txn_id": null
+      }
+    },
+    "B4": {
+      "6.1": {
+        "status": "COMPLIANT",
+        "actual": 3500000.0,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": "COMPLIANT",
+        "actual": 2000000.0,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": "COMPLIANT",
+        "actual": 500000.0,
+        "evidence_txn_id": null
+      }
+    }
+  }
+}

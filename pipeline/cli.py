@@ -11,6 +11,10 @@
       --classifier gemini    ask Gemini about every row (most quota, 429s soonest)
   python -m pipeline.cli score [submission.json]   # score vs answer key
   python -m pipeline.cli ocr [file.pdf ...]  # read images nobody has transcribed (uses quota)
+  python -m pipeline.cli eventday --ledger L.csv --fx FX.csv        # <- THE event-day command
+      preflight -> keyword baseline -> hybrid -> diff -> validate -> GO/NO-GO
+      --no-llm          skip the Gemini pass entirely (no quota spent)
+      --ship hybrid     ship the hybrid result instead of the keyword baseline
   python -m pipeline.cli retrieve "<query>" [--acc ACC-7801] [-k 5]   # inspect what RAG serves
   python -m pipeline.cli definitions   # what the contracts define each category to mean
 """
@@ -95,6 +99,18 @@ def cmd_ocr(args):
     out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nWrote {out_path}. UNVERIFIED — check each value against the PNG in "
           f"cache/images/ before copying it into image_facts.json.")
+
+
+def cmd_eventday(args):
+    """The whole event-day runbook as one command. See pipeline/eventday.py."""
+    from . import eventday
+    opts = {"--ledger": None, "--fx": None, "--ship": "keyword"}
+    for i, a in enumerate(args):
+        if a in opts and i + 1 < len(args):
+            opts[a] = args[i + 1]
+    code = eventday.run(opts["--ledger"], opts["--fx"], ship=opts["--ship"],
+                        no_llm="--no-llm" in args)
+    raise SystemExit(code)
 
 
 def cmd_retrieve(args):
@@ -201,7 +217,8 @@ def cmd_solve(args):
 
 COMMANDS = {"check": cmd_check, "map": cmd_map, "specs": cmd_specs,
             "validate": cmd_validate, "solve": cmd_solve, "score": cmd_score,
-            "ocr": cmd_ocr, "retrieve": cmd_retrieve, "definitions": cmd_definitions}
+            "ocr": cmd_ocr, "retrieve": cmd_retrieve, "definitions": cmd_definitions,
+            "eventday": cmd_eventday}
 
 
 def main():

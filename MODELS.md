@@ -136,6 +136,7 @@ python -m pipeline.test_ledger        # 8 dialects, FX, number parsing
 python -m pipeline.test_roundtrip     # 36/36 through a hostile cp1251/';'/KZT file
 python -m pipeline.test_docs          # real PDFs vs the key
 python -m pipeline.test_retrieval     # index, scoping, spec-leakage guard, grounded prompt
+python -m pipeline.test_eventday      # the shipping gate: envelope, blank cells, the diff
 python -m pipeline.test_e2e           # non-circular end-to-end vs the key
 python -m pipeline.test_holdout       # the two honest numbers
 ```
