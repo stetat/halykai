@@ -237,6 +237,26 @@ Event-day use: when a cell looks wrong, run its narration through
 `python -m pipeline.cli retrieve "<narration>" --acc ACC-78xx` — the passages printed are the
 passages the model saw.
 
+## 9. Related-party name matching (fixed — do not revert to substring)
+
+`classifier._is_related` used to test `kyc_name in counterparty.lower()`. That required the
+ledger to reproduce the dossier's punctuation exactly, and the dossiers do not even agree with
+each other: «Aral Capital Partners, LLP», «Atyrau Holding Group L.L.P», «Ertis Capital, LLP».
+A ledger writing «ARAL CAPITAL PARTNERS LLP» missed on the comma. **4 of every 5 realistic
+renderings failed**, and the failure is silent and points the wrong way — a missed related
+party reports $0 and reads COMPLIANT. This decides every 6.3 plus P6 6.1: **13 of 36 cells**.
+
+Now compared as identifying words with legal forms and punctuation stripped. Two guards, both
+tested, stop the looser matcher from the opposite error: extra words the ledger adds must be
+non-identifying (so «Aktau Holdings Trading House LLP» ≠ «Aktau Holdings LLP»), and the match
+must rest on a distinctive word (every party here is a «<Place> Capital/Holding Partners LLP»,
+so without this «Aktau Holdings LLP» matches the borrower itself, «Aktau Port Services JSC»).
+
+Measured: **108/108** recall on ledger renderings, **0 false positives in 228** non-related
+pairings, pinned by `run_related_party_matching` in `test_classifier`. On event day, watch for
+Cyrillic transliteration of a Latin name («Сарыарка» for «Saryarka») — that is the one class
+this matcher still cannot bridge, and it would need the real ledger to confirm it happens.
+
 ---
 
 ## Command reference
