@@ -249,12 +249,41 @@ def looks_related_party(t) -> bool:
     return any(h in blob for h in _RP_HINTS)
 
 
-def _prompt(txns, related_parties) -> str:
+def _grounding(txns, acc: str | None) -> str:
+    """Passages from THIS borrower's own documents, retrieved against its own narrations.
+
+    Without this the prompt is ungrounded: a category list we wrote, judged against Kazakh
+    payment strings, with the borrower's contract sitting unread on disk. The contract is
+    where «Коммунальные расходы означают расходы на электроэнергию, водоснабжение» is
+    written down — the model should be reading that sentence, not reconstructing it.
+
+    Retrieval is scoped to `acc`. An unscoped retriever is worse than none here: another
+    borrower's clause reads exactly as authoritative and names a different threshold. If
+    anything in the retrieval layer raises, the prompt simply loses its context block — a
+    degraded prompt beats a failed borrower."""
+    if not acc:
+        return ""
+    try:
+        from . import retrieval
+        query = " ".join(f"{t.counterparty} {t.description}" for t in txns[:40])
+        return retrieval.context_for(query, acc=acc, k=3,
+                                     kinds=("contract", "audit"), max_chars=1500)
+    except Exception:
+        return ""
+
+
+def _prompt(txns, related_parties, acc: str | None = None) -> str:
     cats = "\n".join(f"- {k}: {v}" for k, v in CATEGORIES.items())
     rp = ", ".join(sorted(related_parties)) if related_parties else "(список пуст)"
     rows = [f"{t.txn_id} | {t.counterparty} | {t.description} | {t.amount} {t.currency}"
             for t in txns]
+    ctx = _grounding(txns, acc)
+    ctx_block = (
+        "Выдержки из документов ЭТОГО Заёмщика (договор/аудиторский отчёт). "
+        "Если в них категория определена явно — следуй документу, а не общему смыслу слов:\n"
+        f"{ctx}\n\n" if ctx else "")
     return (
+        ctx_block +
         f"Категории (используй ТОЛЬКО эти ключи):\n{cats}\n\n"
         "Правила:\n"
         f"1) ПРИОБРЕТЕНИЕ/ПОКУПКА/СТРОИТЕЛЬСТВО долгосрочных активов — это '{CAPEX}', НЕ '{OPEX}'. "
@@ -288,6 +317,15 @@ def _is_related(counterparty: str, related: set[str]) -> bool:
     return any(cp == r.lower().strip() or r.lower().strip() in cp for r in related if r)
 
 
+def _account_of(txns) -> str | None:
+    """The borrower these transactions belong to, for scoping retrieval.
+
+    Taken from the rows themselves rather than passed down from `solve`, so the grounding is
+    always about the borrower actually being classified even if a caller batches by scenario."""
+    accs = {t.account_id for t in txns if getattr(t, "account_id", None)}
+    return next(iter(accs)) if len(accs) == 1 else None
+
+
 def classify_batch(txns, related_parties=None, model=None, chunk=150) -> dict[str, str]:
     """Return {txn_id: category} for one borrower's transactions (one call per <=chunk txns).
 
@@ -295,12 +333,13 @@ def classify_batch(txns, related_parties=None, model=None, chunk=150) -> dict[st
     (a factual lookup, more reliable than prompting); the LLM handles the accounting
     categories; keyword fallback covers any missing/invalid LLM answer."""
     related = related_parties or set()
+    acc = _account_of(txns)
     out: dict[str, str] = {}
     stats = {"llm": 0, "fallback": 0, "related_override": 0, "errors": []}
     for i in range(0, len(txns), chunk):
         part = txns[i:i + chunk]
         try:
-            raw = gemini.generate(_prompt(part, related),
+            raw = gemini.generate(_prompt(part, related, acc),
                                   model=model or config.MODEL_FLASH, system=_SYSTEM,
                                   json_out=True, temperature=0.0)
             mp = _parse(raw)
@@ -363,6 +402,7 @@ def classify_hybrid(txns, related_parties=None, model=None, chunk=150) -> dict[s
     Falls back to the deterministic answer for anything the LLM does not return, so a quota
     failure degrades to exactly the keyword result rather than to nothing."""
     related = related_parties or set()
+    acc = _account_of(txns)
     out: dict[str, str] = {}
     uncertain = []
     stats = {"deterministic": 0, "asked": 0, "llm_used": 0, "related_override": 0, "errors": []}
@@ -386,7 +426,7 @@ def classify_hybrid(txns, related_parties=None, model=None, chunk=150) -> dict[s
             stats["errors"].append("circuit breaker open — not calling")
             continue
         try:
-            raw = gemini.generate(_prompt(part, related),
+            raw = gemini.generate(_prompt(part, related, acc),
                                   model=model or config.MODEL_FLASH, system=_SYSTEM,
                                   json_out=True, temperature=0.0)
             mp = _parse(raw)

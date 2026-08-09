@@ -11,6 +11,8 @@
       --classifier gemini    ask Gemini about every row (most quota, 429s soonest)
   python -m pipeline.cli score [submission.json]   # score vs answer key
   python -m pipeline.cli ocr [file.pdf ...]  # read images nobody has transcribed (uses quota)
+  python -m pipeline.cli retrieve "<query>" [--acc ACC-7801] [-k 5]   # inspect what RAG serves
+  python -m pipeline.cli definitions   # what the contracts define each category to mean
 """
 from __future__ import annotations
 import sys
@@ -95,6 +97,71 @@ def cmd_ocr(args):
           f"cache/images/ before copying it into image_facts.json.")
 
 
+def cmd_retrieve(args):
+    """Ask the corpus a question and see which passages answer it, with provenance.
+
+    The point is inspection: the same retrieval that grounds the classifier prompt, shown to a
+    human. If a borrower's cell looks wrong on event day, run the narration through here — the
+    passages the model saw are the passages printed."""
+    from . import retrieval
+    acc = None
+    if "--acc" in args:
+        i = args.index("--acc")
+        if i + 1 < len(args):
+            acc = args[i + 1]
+    k = 5
+    if "-k" in args:
+        i = args.index("-k")
+        if i + 1 < len(args):
+            k = int(args[i + 1])
+    skip = {"--acc", acc, "-k", str(k)}
+    query = " ".join(a for a in args if a not in skip and not a.startswith("-"))
+    if not query:
+        print('usage: python -m pipeline.cli retrieve "<query>" [--acc ACC-7801] [-k 5]')
+        return
+    idx = retrieval.index()
+    print(f"{idx.n} passages indexed | query={query!r} | acc={acc or 'ALL'}\n")
+    hits = idx.search(query, k=k, acc=acc)
+    if not hits:
+        print("no passages matched.")
+        return
+    for score, p in hits:
+        print(f"[{score:6.2f}] {p.doc} · {p.kind} · {','.join(p.accs) or '-'}")
+        print(f"         {p.text[:400]}\n")
+
+
+def cmd_definitions(_args):
+    """Every sentence in the corpus that DEFINES a covenant category, grouped by category.
+
+    Read this on event day before touching `classifier._RULES`. The contracts state what they
+    mean by «Коммунальные расходы»; this is that statement, quoted, with the document name. It
+    is deliberately NOT wired into the classifier — measured on the held-out narrations the
+    mined terms fire once and get it wrong, because these contracts define categories
+    procedurally rather than by membership. A new corpus may not, and this is where you find
+    out."""
+    from collections import defaultdict
+    from . import retrieval
+    mined = retrieval.mine_definitions()
+    vocab = retrieval.mined_vocabulary()
+    by_cat: dict[str, list] = defaultdict(list)
+    for m in mined:
+        by_cat[m.category].append(m)
+    sentences = {}
+    for m in mined:
+        sentences.setdefault((m.category, m.sentence[:120]), m)
+    print(f"{len(sentences)} definitional sentence(s); "
+          f"{len(vocab)} term(s) admitted after the idf and collision filters.\n")
+    for (cat, _), m in sorted(sentences.items()):
+        print(f"[{cat}] {m.doc}")
+        print(f"   {m.sentence}\n")
+    print("terms the corpus would contribute (NOT auto-applied — read, then decide):")
+    terms_by_cat: dict[str, list[str]] = defaultdict(list)
+    for t, c in sorted(vocab.items()):
+        terms_by_cat[c].append(t)
+    for c, ts in sorted(terms_by_cat.items()):
+        print(f"  {c:<12} {', '.join(ts)}")
+
+
 def cmd_score(args):
     from . import scorer
     files = [a for a in args if not a.startswith("-")]
@@ -134,7 +201,7 @@ def cmd_solve(args):
 
 COMMANDS = {"check": cmd_check, "map": cmd_map, "specs": cmd_specs,
             "validate": cmd_validate, "solve": cmd_solve, "score": cmd_score,
-            "ocr": cmd_ocr}
+            "ocr": cmd_ocr, "retrieve": cmd_retrieve, "definitions": cmd_definitions}
 
 
 def main():
